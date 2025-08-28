@@ -1,3 +1,8 @@
+// Local value for VPC names used in subnet creation
+locals {
+  vpc_names = keys(var.subnets)
+}
+
 module "pub_subnets" {
   source = "../../modules/subnet"
   for_each = merge([
