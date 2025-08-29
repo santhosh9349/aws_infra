@@ -23,6 +23,6 @@ module "pub_subnets" {
   tags = {
     Name        = each.value.subnet_name
     Environment = var.environment
-    VPC         = each.value.vpc_name
+    VPC         = each.value.vpc_nameI
   }
 }

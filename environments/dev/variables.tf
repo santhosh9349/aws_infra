@@ -25,16 +25,22 @@ variable "subnets" {
   type = map(map(string))
   default = {
     prod = {
-      pub_sub1 = "10.0.100.0/24"
-      pub_sub2 = "10.0.200.0/24"
+      pub_sub1  = "10.0.100.0/24"
+      pub_sub2  = "10.0.200.0/24"
+      priv_sub1 = "10.0.1.0/24"
+      priv_sub2 = "10.0.2.0/24"
     }
     dev = {
-      pub_sub1 = "172.0.100.0/24"
-      pub_sub2 = "172.0.200.0/24"
+      pub_sub1  = "172.0.100.0/24"
+      pub_sub2  = "172.0.200.0/24"
+      priv_sub1 = "172.0.1.0/24"
+      priv_sub2 = "172.0.2.0/24"
     }
     inspection = {
-      pub_sub1 = "192.0.100.0/24"
-      pub_sub2 = "192.0.200.0/24"
+      pub_sub1  = "192.0.100.0/24"
+      pub_sub2  = "192.0.200.0/24"
+      priv_sub1 = "192.0.1.0/24"
+      priv_sub2 = "192.0.2.0/24"
     }
   }
 }
