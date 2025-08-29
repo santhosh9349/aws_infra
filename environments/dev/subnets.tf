@@ -14,7 +14,7 @@ locals {
 }
 
 module "pub_subnets" {
-  source = "../../modules/subnet"
+  source   = "../../modules/subnet"
   for_each = local.subnet_map
 
   vpc_id                  = module.vpc[each.value.vpc_name].vpc_id
