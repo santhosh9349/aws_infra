@@ -27,7 +27,3 @@ module "pub_subnets" {
     VPC         = each.value.vpc_name
   }
 }
-    Environment = var.environment
-    VPC         = each.value.vpc_name
-  }
-}
