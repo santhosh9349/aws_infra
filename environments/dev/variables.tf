@@ -53,3 +53,9 @@ variable "tgw_tags" {
     Environment = "dev"
   }
 }
+
+variable "ram_share_name" {
+  description = "Name of the RAM resource share"
+  type        = string
+  default     = "inspection-tgw-share"
+}
