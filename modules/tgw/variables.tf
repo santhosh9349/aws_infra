@@ -26,3 +26,21 @@ variable "attachment_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "ram_share_name" {
+  description = "Name of the RAM resource share for the TGW"
+  type        = string
+  default     = "inspection-tgw-share"
+}
+
+variable "allow_external_principals" {
+  description = "Allow sharing with external principals"
+  type        = bool
+  default     = false
+}
+
+variable "ram_tags" {
+  description = "Tags for the RAM resource share"
+  type        = map(string)
+  default     = {}
+}

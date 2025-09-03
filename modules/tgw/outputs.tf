@@ -13,3 +13,8 @@ output "vpc_attachment_id" {
   description = "The ID of the VPC attachment"
   value       = aws_ec2_transit_gateway_vpc_attachment.this.id
 }
+
+output "ram_resource_share_arn" {
+  description = "ARN of the RAM resource share"
+  value       = aws_ram_resource_share.this.arn
+}
