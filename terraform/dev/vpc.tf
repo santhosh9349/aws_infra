@@ -1,5 +1,5 @@
 module "vpc" {
-  source      = "../../modules/vpc"
+  source      = "../modules/vpc"
   for_each    = var.vpcs
 
   cidr_block           = each.value

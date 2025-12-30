@@ -13,17 +13,18 @@ locals {
   ]...)
 }
 
-module "pub_subnets" {
-  source   = "../../modules/subnet"
+module "subnets" {
+  source   = "../modules/subnet"
   for_each = local.subnet_map
 
   vpc_id                  = module.vpc[each.value.vpc_name].vpc_id
   cidr_block              = each.value.cidr
   availability_zone       = null
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = startswith(each.value.subnet_name, "pub_")
   tags = {
     Name        = each.value.subnet_name
     Environment = var.environment
     VPC         = each.value.vpc_name
+    Type        = startswith(each.value.subnet_name, "pub_") ? "public" : "private"
   }
 }

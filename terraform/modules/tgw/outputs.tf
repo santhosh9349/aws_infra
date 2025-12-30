@@ -1,4 +1,3 @@
-// filepath: c:\Users\santh\OneDrive\Documents\git\aws_infra\modules\tgw\outputs.tf
 output "transit_gateway_id" {
   description = "The ID of the Transit Gateway"
   value       = aws_ec2_transit_gateway.this.id
