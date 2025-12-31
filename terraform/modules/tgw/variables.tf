@@ -1,4 +1,3 @@
-// filepath: c:\Users\santh\OneDrive\Documents\git\aws_infra\modules\tgw\variables.tf
 variable "description" {
   description = "Description of the Transit Gateway"
   type        = string

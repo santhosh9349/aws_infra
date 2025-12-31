@@ -1,7 +1,7 @@
 /**
- * Leapmove AI Chat API - Mock Implementation
+ * AI Chat API - Mock Implementation
  * 
- * This endpoint simulates streaming responses from an AI assistant trained on Leapmove services.
+ * This endpoint simulates streaming responses from an AI assistant.
  * 
  * SECURITY NOTES:
  * - Authentication is handled in middleware.ts (currently disabled for dev)
@@ -14,7 +14,7 @@
  * 1. Install provider SDK (e.g., @ai-sdk/openai, @anthropic-ai/sdk)
  * 2. Add API key to environment variables (never hardcode)
  * 3. Replace mock stream with real provider streaming
- * 4. Implement RAG system for Leapmove knowledge base
+ * 4. Implement RAG system for your knowledge base
  * 5. Add conversation memory and context management
  * 
  * Example with OpenAI (with authentication):
@@ -35,8 +35,7 @@
  *   
  *   const result = streamText({
  *     model: openai('gpt-4'),
- *     system: `You are Leapmove AI, an expert in AI training, enterprise solutions, and AI agent integration.
- *              Company mission: Elevating business to move as fast as modern technology utilizing AI.
+ *     system: `You are an AI assistant, an expert in AI training, enterprise solutions, and AI agent integration.
  *              User: ${userEmail}`,
  *     messages,
  *     temperature: 0.7,
@@ -69,20 +68,20 @@ async function* simulateStream(text: string): AsyncGenerator<string, void, unkno
   for (const word of words) {
     yield word + ' ';
     // Simulate network delay
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await new Promise<void>(resolve => setTimeout(resolve, 50));
   }
 }
 
 /**
  * Generate mock AI response based on user message
  * In production, this would be replaced with actual LLM calls
- * customized with Leapmove's knowledge base via RAG
+ * customized with your knowledge base via RAG
  */
 function generateMockResponse(userMessage: string): string {
   const lowerMessage: string = userMessage.toLowerCase();
   
   if (lowerMessage.includes('hello') || lowerMessage.includes('hi')) {
-    return "Hello! I'm Leapmove AI, your partner in business acceleration. I can help you with AI training programs, enterprise solutions, or AI agent integration. What would you like to explore today?";
+    return "Hello! I'm an AI assistant, your partner in business acceleration. I can help you with AI training programs, enterprise solutions, or AI agent integration. What would you like to explore today?";
   }
   
   if (lowerMessage.includes('training') || lowerMessage.includes('uplift') || lowerMessage.includes('learn')) {
@@ -90,7 +89,7 @@ function generateMockResponse(userMessage: string): string {
   }
   
   if (lowerMessage.includes('enterprise') || lowerMessage.includes('ecommerce') || lowerMessage.includes('scale')) {
-    return "Leapmove specializes in building high-performance, AI-enhanced enterprise platforms. We use Next.js 15, React 19, and AWS infrastructure (EC2, ALB, CloudFront) with Terraform IaC. Our solutions deliver sub-50ms response times at scale with real-time AI-powered insights. Let's discuss how we can transform your digital presence!";
+    return "We specialize in building high-performance, AI-enhanced enterprise platforms. We use Next.js 15, React 19, and AWS infrastructure (EC2, ALB, CloudFront) with Terraform IaC. Our solutions deliver sub-50ms response times at scale with real-time AI-powered insights. Let's discuss how we can transform your digital presence!";
   }
   
   if (lowerMessage.includes('agent') || lowerMessage.includes('chatbot') || lowerMessage.includes('support')) {
@@ -105,12 +104,12 @@ function generateMockResponse(userMessage: string): string {
     return "We deploy all solutions on enterprise-grade AWS infrastructure using Infrastructure as Code (Terraform). Our stack includes EC2 for compute, ALB for load balancing, CloudFront for CDN, and VPC for networking. Everything is version-controlled, reproducible, and optimized for high availability. Want to learn more about our deployment process?";
   }
   
-  if (lowerMessage.includes('leapmove') || lowerMessage.includes('company') || lowerMessage.includes('mission')) {
-    return "Leapmove's mission is to elevate businesses to move as fast as modern technology utilizing AI. We believe in leapfrogging the competition through AI-driven acceleration. Our team combines deep technical expertise with business acumen to deliver transformative solutions. We're not just consultants - we're your acceleration partners!";
+  if (lowerMessage.includes('company') || lowerMessage.includes('mission')) {
+    return "Our mission is to elevate businesses to move as fast as modern technology utilizing AI. We believe in leapfrogging the competition through AI-driven acceleration. Our team combines deep technical expertise with business acumen to deliver transformative solutions. We're not just consultants - we're your acceleration partners!";
   }
   
   // Default response
-  return "I'm Leapmove AI, here to help you accelerate your business with AI! I can discuss:\n\n• AI Engineering Uplift (team training)\n• Scalable Enterprise & E-commerce Solutions\n• AI Agent Integration (24/7 chatbots)\n• AWS Infrastructure & Deployment\n• Custom AI Solutions\n\nWhat would you like to know more about?";
+  return "I'm an AI assistant, here to help you accelerate your business with AI! I can discuss:\n\n• AI Engineering Uplift (team training)\n• Scalable Enterprise & E-commerce Solutions\n• AI Agent Integration (24/7 chatbots)\n• AWS Infrastructure & Deployment\n• Custom AI Solutions\n\nWhat would you like to know more about?";
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -188,7 +187,7 @@ export async function GET(): Promise<Response> {
   return Response.json(
     {
       status: 'ok',
-      service: 'Leapmove AI Chat',
+      service: 'AI Chat',
       endpoint: '/api/chat',
       mode: 'mock',
       message: 'Chat API is ready. Integrate real LLM provider for production.',

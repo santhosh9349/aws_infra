@@ -35,8 +35,13 @@ const nextConfig = {
             value: 'nosniff'
           },
           {
-            key: 'X-XSS-Protection',
-            value: '1; mode=block'
+            key: 'Content-Security-Policy',
+            // NOTE: CSP allows 'unsafe-inline' and 'unsafe-eval' for backward compatibility
+            // with Next.js inline scripts. For production, consider migrating to:
+            // - Using nonces for inline scripts
+            // - Removing 'unsafe-eval' if not strictly necessary
+            // - Implementing stricter CSP policies gradually
+            value: "default-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
           },
           {
             key: 'Referrer-Policy',
