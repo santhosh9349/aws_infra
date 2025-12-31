@@ -1,4 +1,3 @@
-// filepath: c:\Users\santh\OneDrive\Documents\git\aws_infra\modules\tgw\main.tf
 resource "aws_ec2_transit_gateway" "this" {
   description = var.description
   tags        = var.tags

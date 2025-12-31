@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 /**
- * Enterprise Security Middleware for Leapmove
+ * Enterprise Security Middleware for this application
  * 
  * This middleware provides security guardrails for the chat API and other sensitive endpoints.
  * Currently configured for development. Enable authentication in production.
@@ -61,7 +61,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
       // Option 3: API Key authentication (for service-to-service)
       const apiKey = request.headers.get('x-api-key');
-      const validApiKey = process.env.LEAPMOVE_API_KEY;
+      const validApiKey = process.env.API_KEY;
       
       if (!apiKey || apiKey !== validApiKey) {
         return NextResponse.json(
@@ -140,7 +140,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   const response = NextResponse.next();
   
   // Add security headers to all responses
-  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Frame-Options', 'SAMEORIGIN');
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('Referrer-Policy', 'origin-when-cross-origin');
   response.headers.set(
