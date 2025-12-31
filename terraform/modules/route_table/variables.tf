@@ -3,11 +3,6 @@ variable "vpc_id" {
   type        = string
 }
 
-variable "subnet_ids" {
-  description = "List of subnet IDs to associate with this route table"
-  type        = list(string)
-}
-
 variable "transit_gateway_id" {
   description = "The ID of the Transit Gateway for inter-VPC routing"
   type        = string
@@ -21,9 +16,9 @@ variable "destination_cidr_blocks" {
 }
 
 variable "internet_gateway_id" {
-  description = "The ID of the Internet Gateway for public subnet routing (optional)"
+  description = "The ID of the Internet Gateway for public subnet routing (optional - use empty string for none)"
   type        = string
-  default     = null
+  default     = ""
 }
 
 variable "tags" {

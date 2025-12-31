@@ -10,17 +10,17 @@ locals {
     ]
   }
   
-  # Dynamically group subnets by VPC and type (public/private)
+  # Dynamically group subnets by VPC and type (public/private) - using KEYS not IDs
   subnets_by_vpc_and_type = {
     for vpc_name in local.all_vpc_names : vpc_name => {
       public = [
         for subnet_key, subnet_data in local.subnet_map :
-        module.subnets[subnet_key].subnet_id
+        subnet_key
         if subnet_data.vpc_name == vpc_name && startswith(subnet_data.subnet_name, "pub_")
       ]
       private = [
         for subnet_key, subnet_data in local.subnet_map :
-        module.subnets[subnet_key].subnet_id
+        subnet_key
         if subnet_data.vpc_name == vpc_name && startswith(subnet_data.subnet_name, "priv_")
       ]
     }
@@ -51,7 +51,7 @@ module "private_route_tables" {
     for vpc_name in local.all_vpc_names : "${vpc_name}_private" => {
       vpc_name          = vpc_name
       vpc_id            = module.vpc[vpc_name].vpc_id
-      subnet_ids        = local.subnets_by_vpc_and_type[vpc_name].private
+      subnet_keys       = local.subnets_by_vpc_and_type[vpc_name].private
       destination_cidrs = local.vpc_route_destinations[vpc_name]
     }
     # Only create if there are private subnets
@@ -59,9 +59,9 @@ module "private_route_tables" {
   }
 
   vpc_id                  = each.value.vpc_id
-  subnet_ids              = each.value.subnet_ids
   transit_gateway_id      = module.tgw.transit_gateway_id
   destination_cidr_blocks = toset(each.value.destination_cidrs)
+  internet_gateway_id     = ""  # Private subnets don't use IGW
 
   tags = {
     Name        = "${each.value.vpc_name}-private-rt"
@@ -75,6 +75,23 @@ module "private_route_tables" {
   }
 }
 
+# Private Subnet Route Table Associations
+resource "aws_route_table_association" "private" {
+  for_each = merge([
+    for vpc_name in local.all_vpc_names : {
+      for subnet_key in local.subnets_by_vpc_and_type[vpc_name].private :
+      subnet_key => {
+        subnet_id      = module.subnets[subnet_key].subnet_id
+        route_table_id = module.private_route_tables["${vpc_name}_private"].route_table_id
+      }
+    }
+    if length(local.subnets_by_vpc_and_type[vpc_name].private) > 0
+  ]...)
+
+  subnet_id      = each.value.subnet_id
+  route_table_id = each.value.route_table_id
+}
+
 # Public Route Tables - Dynamically created for all VPCs with IGW and TGW routes
 module "public_route_tables" {
   source   = "../modules/route_table"
@@ -82,7 +99,7 @@ module "public_route_tables" {
     for vpc_name in local.all_vpc_names : "${vpc_name}_public" => {
       vpc_name          = vpc_name
       vpc_id            = module.vpc[vpc_name].vpc_id
-      subnet_ids        = local.subnets_by_vpc_and_type[vpc_name].public
+      subnet_keys       = local.subnets_by_vpc_and_type[vpc_name].public
       igw_id            = aws_internet_gateway.igw[vpc_name].id
       destination_cidrs = local.vpc_route_destinations[vpc_name]
     }
@@ -91,7 +108,6 @@ module "public_route_tables" {
   }
 
   vpc_id                  = each.value.vpc_id
-  subnet_ids              = each.value.subnet_ids
   transit_gateway_id      = module.tgw.transit_gateway_id
   destination_cidr_blocks = toset(each.value.destination_cidrs)
   internet_gateway_id     = each.value.igw_id
@@ -106,4 +122,21 @@ module "public_route_tables" {
     CostCenter  = var.environment
     Owner       = "DevOps Team"
   }
+}
+
+# Public Subnet Route Table Associations
+resource "aws_route_table_association" "public" {
+  for_each = merge([
+    for vpc_name in local.all_vpc_names : {
+      for subnet_key in local.subnets_by_vpc_and_type[vpc_name].public :
+      subnet_key => {
+        subnet_id      = module.subnets[subnet_key].subnet_id
+        route_table_id = module.public_route_tables["${vpc_name}_public"].route_table_id
+      }
+    }
+    if length(local.subnets_by_vpc_and_type[vpc_name].public) > 0
+  ]...)
+
+  subnet_id      = each.value.subnet_id
+  route_table_id = each.value.route_table_id
 }
