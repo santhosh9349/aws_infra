@@ -1,3 +1,7 @@
+# /*
+# Transit Gateway configuration - COMMENTED OUT FOR INITIAL DEPLOYMENT
+# Uncomment after VPCs and subnets are successfully deployed
+
 # Locals for dynamic TGW attachment configuration
 locals {
   # Dynamically create TGW attachments for all VPCs using their private subnets
@@ -29,3 +33,4 @@ module "tgw" {
   tags            = var.tgw_tags
   vpc_attachments = local.tgw_attachments
 }
+# */

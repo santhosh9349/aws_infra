@@ -1,3 +1,4 @@
+# VPC Outputs - ACTIVE
 output "vpc_ids" {
   description = "IDs of the created VPCs"
   value       = { for k, v in module.vpc : k => v.vpc_id }
@@ -7,6 +8,9 @@ output "vpc_cidrs" {
   description = "CIDR blocks of the created VPCs"
   value       = { for k, v in module.vpc : k => v.vpc_cidr_block }
 }
+
+# /*
+# COMMENTED OUT - Will be activated after networking is deployed
 
 # Transit Gateway Outputs
 output "transit_gateway_id" {
@@ -45,3 +49,4 @@ output "internet_gateway_ids" {
   description = "Map of Internet Gateway IDs"
   value       = { for k, v in aws_internet_gateway.igw : k => v.id }
 }
+# */

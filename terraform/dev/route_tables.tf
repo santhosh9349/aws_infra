@@ -1,3 +1,7 @@
+# /*
+# Route Tables configuration - COMMENTED OUT FOR INITIAL DEPLOYMENT
+# Uncomment after VPCs and subnets are successfully deployed
+
 # Locals for dynamic route table configuration
 locals {
   # Get all VPC names dynamically
@@ -140,3 +144,4 @@ resource "aws_route_table_association" "public" {
   subnet_id      = each.value.subnet_id
   route_table_id = each.value.route_table_id
 }
+# */
