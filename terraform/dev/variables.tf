@@ -14,15 +14,15 @@ variable "vpcs" {
   description = "Map of VPC names to their CIDR blocks"
   type        = map(string)
   default = {
-    "prod"  = "10.0.0.0/16"
-    "dev" = "172.0.0.0/16"
+    "prod"       = "10.0.0.0/16"
+    "dev"        = "172.0.0.0/16"
     "inspection" = "192.0.0.0/16"
   }
 }
 
 variable "subnets" {
   description = "Map of VPC names to their public subnet CIDRs"
-  type = map(map(string))
+  type        = map(map(string))
   default = {
     prod = {
       pub_sub1  = "10.0.100.0/24"
