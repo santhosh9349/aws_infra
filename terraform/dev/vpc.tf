@@ -1,6 +1,6 @@
 module "vpc" {
-  source      = "../modules/vpc"
-  for_each    = var.vpcs
+  source   = "../modules/vpc"
+  for_each = var.vpcs
 
   cidr_block           = each.value
   enable_dns_hostnames = true

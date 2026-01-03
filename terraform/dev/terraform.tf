@@ -5,7 +5,7 @@ terraform {
       name = "aws_infra"
     }
   }
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"

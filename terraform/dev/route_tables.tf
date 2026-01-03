@@ -1,22 +1,21 @@
-# /*
-# Route Tables configuration - COMMENTED OUT FOR INITIAL DEPLOYMENT
-# Uncomment after VPCs and subnets are successfully deployed
+/*
+Route Tables configuration - COMMENTED OUT FOR INITIAL DEPLOYMENT
+Uncomment after VPCs and subnets are successfully deployed
+*/
 
+/*
 # Locals for dynamic route table configuration
 locals {
-  # Get all VPC names dynamically
-  all_vpc_names = keys(var.vpcs)
-  
   # Create a map of VPC to its destination CIDRs (all other VPCs)
   vpc_route_destinations = {
-    for vpc_name in local.all_vpc_names : vpc_name => [
+    for vpc_name in local.vpc_names : vpc_name => [
       for other_vpc_name, cidr in var.vpcs : cidr if other_vpc_name != vpc_name
     ]
   }
   
   # Dynamically group subnets by VPC and type (public/private) - using KEYS not IDs
   subnets_by_vpc_and_type = {
-    for vpc_name in local.all_vpc_names : vpc_name => {
+    for vpc_name in local.vpc_names : vpc_name => {
       public = [
         for subnet_key, subnet_data in local.subnet_map :
         subnet_key
@@ -52,7 +51,7 @@ resource "aws_internet_gateway" "igw" {
 module "private_route_tables" {
   source   = "../modules/route_table"
   for_each = {
-    for vpc_name in local.all_vpc_names : "${vpc_name}_private" => {
+    for vpc_name in local.vpc_names : "${vpc_name}_private" => {
       vpc_name          = vpc_name
       vpc_id            = module.vpc[vpc_name].vpc_id
       subnet_keys       = local.subnets_by_vpc_and_type[vpc_name].private
@@ -82,7 +81,7 @@ module "private_route_tables" {
 # Private Subnet Route Table Associations
 resource "aws_route_table_association" "private" {
   for_each = merge([
-    for vpc_name in local.all_vpc_names : {
+    for vpc_name in local.vpc_names : {
       for subnet_key in local.subnets_by_vpc_and_type[vpc_name].private :
       subnet_key => {
         subnet_id      = module.subnets[subnet_key].subnet_id
@@ -100,7 +99,7 @@ resource "aws_route_table_association" "private" {
 module "public_route_tables" {
   source   = "../modules/route_table"
   for_each = {
-    for vpc_name in local.all_vpc_names : "${vpc_name}_public" => {
+    for vpc_name in local.vpc_names : "${vpc_name}_public" => {
       vpc_name          = vpc_name
       vpc_id            = module.vpc[vpc_name].vpc_id
       subnet_keys       = local.subnets_by_vpc_and_type[vpc_name].public
@@ -131,7 +130,7 @@ module "public_route_tables" {
 # Public Subnet Route Table Associations
 resource "aws_route_table_association" "public" {
   for_each = merge([
-    for vpc_name in local.all_vpc_names : {
+    for vpc_name in local.vpc_names : {
       for subnet_key in local.subnets_by_vpc_and_type[vpc_name].public :
       subnet_key => {
         subnet_id      = module.subnets[subnet_key].subnet_id
@@ -144,4 +143,4 @@ resource "aws_route_table_association" "public" {
   subnet_id      = each.value.subnet_id
   route_table_id = each.value.route_table_id
 }
-# */
+*/
