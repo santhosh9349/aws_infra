@@ -1,47 +1,32 @@
-# AWS Infrastructure - Next.js + Terraform Monorepo
+# AWS Infrastructure - Terraform IaC Repository
 
-This repository manages a full-stack AWS infrastructure deployment combining a Next.js 15 frontend with Infrastructure as Code (IaC) using Terraform. The application is hosted on AWS EC2 instances behind an Application Load Balancer (ALB), and infrastructure is provisioned across multiple environments (dev/prod) with strict tagging and security standards.
+This repository manages AWS infrastructure deployment using Infrastructure as Code (IaC) with Terraform. Infrastructure is provisioned across multiple environments (dev/prod) with strict tagging, security standards, and automated scalability patterns.
 
 ## Tech Stack
-
-### Frontend
-- **Next.js 15** for server-side rendering and optimal performance
-- **React 19** with Server Components where applicable
-- **TypeScript** (strict mode enabled) for type safety across all frontend code
-- **Tailwind CSS** for utility-first styling and responsive design
-- All frontend code resides in `app/` directory
-- Application runs on Node.js runtime on EC2 instances
 
 ### Infrastructure
 - **Terraform v1.5.x** for declarative infrastructure management
 - **AWS Provider 5.x** for AWS resource provisioning
-- **AWS Services**: VPC (multi-VPC architecture), Transit Gateway (full mesh connectivity), Subnets, Route Tables, Internet Gateways, EC2 (application hosting)
+- **AWS Services**: VPC (multi-VPC architecture), Transit Gateway (full mesh connectivity), Subnets, Route Tables, Internet Gateways, EC2, Security Groups
 - **State Management**: Terraform Cloud (remote state, no local state management)
 - **Architecture**: Multi-VPC setup with Transit Gateway hub for inter-VPC communication
   - Inspection VPC (192.0.0.0/16) - Network inspection/firewall
   - Dev VPC (172.0.0.0/16) - Development environment
   - Prod VPC (10.0.0.0/16) - Production environment
 - Infrastructure organized into reusable modules under `terraform/modules/`
-- Environment-specific configurations in `terraform/dev/` (prod not yet implemented)
+- Environment-specific configurations in `terraform/dev/` and `terraform/prod/`
 - **Scalability**: Fully dynamic - scales from 3 to 100+ VPCs with zero code changes
 
 ### Development Tools
 - Scripts for common tasks located in `scripts/` directory
-- GitHub Actions for CI/CD (if applicable)
+- GitHub Actions for CI/CD workflows
 - MCP servers for enhanced workflow automation
+- SpecKit for feature specification and planning (`.specify/`, `.github/agents/`)
 
 ## Project Structure
 
 ```
 aws_infra/
-├── app/                          # Next.js 15 application
-│   ├── components/              # React components
-│   ├── pages/                   # Next.js pages (if using pages router)
-│   ├── app/                     # App router (if using app router)
-│   ├── styles/                  # Tailwind CSS and custom styles
-│   ├── public/                  # Static assets
-│   └── next.config.js           # Next.js configuration
-│
 ├── terraform/                    # Infrastructure as Code
 │   ├── modules/                 # Reusable Terraform modules
 │   │   ├── vpc/                # VPC module with networking configuration
@@ -56,7 +41,7 @@ aws_infra/
 │   │   │   ├── main.tf         # Route table, associations, TGW/IGW routes
 │   │   │   ├── outputs.tf      # Route table outputs (route_table_id, etc.)
 │   │   │   └── variables.tf    # Route table input variables
-│   │   ├── ec2/                # EC2 instance module (hosts Next.js app)
+│   │   ├── ec2/                # EC2 instance module
 │   │   │   ├── main.tf         # EC2 instance definitions
 │   │   │   ├── outputs.tf      # EC2 outputs (instance_ids, IPs, etc.)
 │   │   │   └── variables.tf    # EC2 input variables
@@ -81,31 +66,32 @@ aws_infra/
 │   └── prod/                    # Production environment configuration
 │       └── (not yet implemented - use dev/ as template)
 │
+├── environments/                 # Environment-specific configurations
+│   └── dev/                     # Development environment files
+│
 ├── scripts/                      # Automation and utility scripts
 │   └── (deployment, testing, setup scripts)
 │
+├── .specify/                     # SpecKit feature specification system
+│   ├── memory/                  # Feature specifications and documentation
+│   ├── scripts/                 # SpecKit automation scripts
+│   └── templates/               # Specification templates
+│
 ├── .github/                      # GitHub configuration
-│   └── copilot-instructions.md  # This file
+│   ├── copilot-instructions.md  # This file
+│   ├── agents/                  # SpecKit agent definitions
+│   │   ├── speckit.clarify.agent.md
+│   │   └── (other agent files)
+│   └── prompts/                 # SpecKit prompt templates
+│
+├── .gemini/                      # Gemini AI integration
+│   └── commands/                # Custom command definitions
 │
 ├── README.md                     # Project documentation
 └── LICENSE                       # License information
 ```
 
 ## Coding Guidelines
-
-### TypeScript Standards
-- **Always use strict TypeScript mode** across all frontend and configuration files
-- **Type hints required** for all function parameters and return values
-- **No implicit `any` types** - explicitly type all variables
-- **Use interfaces over type aliases** for object shapes when possible
-- **Prefer const assertions** for literal types
-
-### Frontend Guidelines
-- **Component structure**: Use functional components with TypeScript interfaces for props
-- **Styling**: Tailwind CSS utility classes only - avoid custom CSS unless absolutely necessary
-- **File naming**: Use kebab-case for files (`user-profile.tsx`), PascalCase for components (`UserProfile`)
-- **Import order**: External libraries → Internal modules → Relative imports
-- **Code organization**: Keep components small and focused (< 200 lines ideal)
 
 ### Infrastructure as Code (Terraform) Guidelines
 - **Module-first approach**: Create reusable modules for all infrastructure components
@@ -140,6 +126,7 @@ aws_infra/
 - **Documentation**: Update README.md when adding new features or infrastructure
 - **Git commits**: Use conventional commit messages (feat:, fix:, docs:, refactor:, etc.)
 - **PR requirements**: All changes require pull request with description and testing notes
+- **SpecKit workflow**: Use SpecKit agents for feature specification, clarification, and planning before implementation
 
 ## Environment-Specific Guidelines
 
@@ -147,6 +134,7 @@ aws_infra/
 - Use smaller instance types for cost optimization
 - Enable detailed logging and debugging
 - Relaxed security groups for testing (within reason)
+- Test new infrastructure patterns before production deployment
 
 ### Production (prod/)
 - Use production-grade instance types
@@ -154,6 +142,7 @@ aws_infra/
 - Strict security groups following least privilege
 - Enable AWS WAF and Shield when applicable
 - Multi-AZ deployment for high availability
+- Implement automated backups and disaster recovery
 
 ## MCP Server Integration
 
@@ -167,9 +156,28 @@ aws_infra/
 - Provide Terraform Cloud links after operations
 - Focus on configuration and modules - ignore state management
 
-## Resources & Scripts`terraform/dev/` and use Terraform commands (`terraform plan`, `terraform apply`)
+## SpecKit Integration
+
+### Feature Development Workflow
+1. **Specify**: Use `/speckit.specify` to create feature specifications in `.specify/memory/`
+2. **Clarify**: Use `/speckit.clarify` to resolve ambiguities and add clarifications
+3. **Plan**: Use `/speckit.plan` to create technical implementation plans
+4. **Implement**: Use `/speckit.implement` to execute the plan with validation
+
+### Agent Files
+- Agents located in [.github/agents/](.github/agents/) define specialized workflows
+- [`speckit.clarify.agent.md`](.github/agents/speckit.clarify.agent.md): Identifies and resolves specification ambiguities
+- Additional agents available for specification, planning, and implementation phases
+
+### Prerequisites Script
+- Run `.specify/scripts/powershell/check-prerequisites.ps1` to validate feature branch environment
+- Use `-Json -PathsOnly` flags for structured output during automated workflows
+
+## Resources & Scripts
+
+### Common Tasks
+- **Deploy infrastructure**: Navigate to environment folder (`terraform/dev/` or `terraform/prod/`) and use Terraform commands (`terraform plan`, `terraform apply`)
 - **Scale infrastructure**: Add new VPCs to `var.vpcs` and subnets to `var.subnets` in `variables.tf` - everything else is automatic
-- **Application deployment**: Build Next.js application and deploy to EC2 instances via SSH or CI/CD pipeline
 - **Module updates**: Modify modules in `terraform/modules/` and update version references in environment configs
 - **Multi-VPC connectivity**: All VPCs automatically get full mesh routing via Transit Gateway
 - **View architecture**: Check `TGW_CONNECTIVITY_GUIDE.md` for infrastructure diagrams
@@ -177,33 +185,30 @@ aws_infra/
 - Scripts should be executable and include usage documentation in comments
 - Create new scripts for repetitive tasks
 
-### Common Tasks
-- **Deploy infrastructure**: Navigate to appropriate environment folder (`terraform/dev/` or `terraform/prod/`) and use Terraform commands
-- **Application deployment**: Build Next.js application and deploy to EC2 instances via SSH or CI/CD pipeline
-- **ALB configuration**: Update ALB listeners, target groups, and health checks as needed
-- **Module updates**: Modify modules in `terraform/modules/` and update version references in environment configs
-
 ## Security & Compliance
 
 ### AWS Security Best Practices
-- **ALB Security**: 
-  - Use HTTPS listeners with ACM certificates
-  - Configure security groups to allow only necessary traffic
-  - Enable access logs and connection logs
-  - Implement WAF rules for additional protection
+- **VPC Security**: 
+  - Use security groups to control traffic between resources
+  - Implement NACLs for additional network-level security
+  - Enable VPC Flow Logs for network traffic analysis
 - **EC2 Instances**: 
-  - Place in private subnets behind ALB
-  - Use security groups to restrict access to ALB only
+  - Place in private subnets when possible
+  - Use security groups to restrict access
   - Enable Systems Manager for secure access (no SSH keys)
+  - Use IAM instance profiles for AWS service access
 - **IAM Policies**: Follow principle of least privilege
-- **Encryption**: Enable encryption at rest (EBS) and in transit (HTTPS/TLS)
+- **Encryption**: Enable encryption at rest (EBS) and in transit (TLS)
 - **Network**: Use VPC security groups and NACLs appropriately
-- **Logging**: Enable CloudTrail, VPC Flow Logs, and ALB access logs
+- **Logging**: Enable CloudTrail, VPC Flow Logs, and resource-specific logs
 
 ### Code Security
 - Never hardcode credentials or secrets
 - Use AWS Secrets Manager or Parameter Store for sensitive data
-- IInfrastructure Architecture
+- Scan Terraform code for security issues before applying
+- Review security group rules for overly permissive access
+
+## Infrastructure Architecture
 
 ### Multi-VPC Design
 The infrastructure uses a **Transit Gateway hub-and-spoke** model for inter-VPC connectivity:
@@ -233,7 +238,7 @@ The infrastructure uses a **Transit Gateway hub-and-spoke** model for inter-VPC 
 ### Scalability
 - **Current**: 3 VPCs, 12 subnets, 6 route tables, 1 Transit Gateway, 3 TGW attachments
 - **Can scale to**: 100+ VPCs with zero code changes (just update variables)
-- **Full documentation**: See `terraform/dev/SCALABILITY_GUIDE.md` and `SCALING_EXAMPLE.md`
+- **Full documentation**: See [terraform/dev/SCALABILITY_GUIDE.md](terraform/dev/SCALABILITY_GUIDE.md) and [SCALING_EXAMPLE.md](terraform/dev/SCALING_EXAMPLE.md)
 
 ## Notes for Copilot
 
@@ -245,16 +250,21 @@ The infrastructure uses a **Transit Gateway hub-and-spoke** model for inter-VPC 
 - Respect subnet naming convention: `pub_*` for public, `priv_*` for private
 - When adding new VPCs, only update `variables.tf` - all other files are dynamic
 
-### Frontend Best Practices
-- For Next.js components, follow the established component structure in `app/`
-- Ensure EC2 instances are always placed in private subnets
-- Use Application Load Balancer in public subnets for internet-facing apps
+### Module Development
+- All modules must have `main.tf`, `variables.tf`, and `outputs.tf`
+- Include comprehensive variable descriptions
+- Output all critical resource identifiers
+- Use consistent naming patterns across modules
 
 ### Documentation
 - Major infrastructure changes should be documented in relevant .md files
-- Keep TGW_CONNECTIVITY_GUIDE.md updated with architecture changes
-- Update SCALABILITY_GUIDE.md if scaling patterns changecture components
-- Ensure EC2 instances are always placed in private subnets with ALB in public subnets
-- Configure ALB health checks to match the Next.js application's health endpoint
-- Use target groups to manage EC2 instances behind the ALB
+- Keep [TGW_CONNECTIVITY_GUIDE.md](terraform/dev/TGW_CONNECTIVITY_GUIDE.md) updated with architecture changes
+- Update [SCALABILITY_GUIDE.md](terraform/dev/SCALABILITY_GUIDE.md) if scaling patterns change
+- Document new modules in module-specific README files
+
+### SpecKit Workflow
+- Use SpecKit agents for structured feature development
+- Run clarification phase before creating implementation plans
+- Validate prerequisites before starting implementation
+- Follow the specify → clarify → plan → implement workflow for complex features
 
