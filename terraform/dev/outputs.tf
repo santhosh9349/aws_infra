@@ -9,6 +9,27 @@ output "vpc_cidrs" {
   value       = { for k, v in module.vpc : k => v.vpc_cidr_block }
 }
 
+# Internal Web Server Outputs
+output "internal_web_server_instance_id" {
+  description = "The ID of the internal web server EC2 instance"
+  value       = module.internal_web_server.instance_id
+}
+
+output "internal_web_server_private_ip" {
+  description = "The private IP address of the internal web server"
+  value       = module.internal_web_server.private_ip
+}
+
+output "internal_web_server_security_group_id" {
+  description = "The security group ID for the internal web server"
+  value       = module.internal_web_server.security_group_id
+}
+
+output "internal_web_server_iam_role_arn" {
+  description = "The IAM role ARN for SSM access"
+  value       = module.internal_web_server.iam_role_arn
+}
+
 /*
 COMMENTED OUT - Will be activated after networking is deployed
 
