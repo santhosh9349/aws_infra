@@ -20,7 +20,7 @@ module "internal_web_server" {
   user_data = file("${path.module}/../../specs/001-internal-web-server/contracts/user-data.sh")
 
   # Root volume configuration
-  root_volume_size = 20
+  root_volume_size = 30
 
   # Mandatory tags per Constitution
   tags = {
