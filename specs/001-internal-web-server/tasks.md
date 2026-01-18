@@ -19,9 +19,9 @@
 
 **Purpose**: Terraform module structure and development environment setup
 
-- [ ] T001 Verify existing EC2 module structure in terraform/modules/ec2/ (main.tf, variables.tf, outputs.tf exist)
-- [ ] T002 Review current Dev VPC infrastructure in terraform/dev/ (VPC ID, subnet IDs, Transit Gateway)
-- [ ] T003 [P] Create user data script at specs/001-internal-web-server/contracts/user-data.sh (already exists - validate)
+- [X] T001 Verify existing EC2 module structure in terraform/modules/ec2/ (main.tf, variables.tf, outputs.tf exist)
+- [X] T002 Review current Dev VPC infrastructure in terraform/dev/ (VPC ID, subnet IDs, Transit Gateway)
+- [X] T003 [P] Create user data script at specs/001-internal-web-server/contracts/user-data.sh (already exists - validate)
 
 ---
 
@@ -31,15 +31,15 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Add AWS AMI data source for Amazon Linux 2023 in terraform/modules/ec2/main.tf
-- [ ] T005 [P] Create IAM role for SSM access in terraform/modules/ec2/main.tf (aws_iam_role.ssm_role)
-- [ ] T006 [P] Create IAM role policy attachment for SSM in terraform/modules/ec2/main.tf (aws_iam_role_policy_attachment.ssm_policy)
-- [ ] T007 [P] Create IAM instance profile in terraform/modules/ec2/main.tf (aws_iam_instance_profile.ssm_instance)
-- [ ] T008 Create security group resource in terraform/modules/ec2/main.tf (aws_security_group.web_server with dynamic ingress)
-- [ ] T009 Update EC2 instance resource in terraform/modules/ec2/main.tf (add IAM profile, security group, encrypted EBS)
-- [ ] T010 [P] Add security group variables in terraform/modules/ec2/variables.tf (ingress_cidrs list)
-- [ ] T011 [P] Add IAM and security group outputs in terraform/modules/ec2/outputs.tf
-- [ ] T012 Run terraform fmt on terraform/modules/ec2/ directory
+- [X] T004 Add AWS AMI data source for Amazon Linux 2023 in terraform/modules/ec2/main.tf
+- [X] T005 [P] Create IAM role for SSM access in terraform/modules/ec2/main.tf (aws_iam_role.ssm_role)
+- [X] T006 [P] Create IAM role policy attachment for SSM in terraform/modules/ec2/main.tf (aws_iam_role_policy_attachment.ssm_policy)
+- [X] T007 [P] Create IAM instance profile in terraform/modules/ec2/main.tf (aws_iam_instance_profile.ssm_instance)
+- [X] T008 Create security group resource in terraform/modules/ec2/main.tf (aws_security_group.web_server with dynamic ingress)
+- [X] T009 Update EC2 instance resource in terraform/modules/ec2/main.tf (add IAM profile, security group, encrypted EBS)
+- [X] T010 [P] Add security group variables in terraform/modules/ec2/variables.tf (ingress_cidrs list)
+- [X] T011 [P] Add IAM and security group outputs in terraform/modules/ec2/outputs.tf
+- [X] T012 Run terraform fmt on terraform/modules/ec2/ directory
 
 **Checkpoint**: EC2 module enhanced with SSM, security groups, and encryption - ready for instantiation
 
@@ -53,14 +53,14 @@
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Create/update terraform/dev/ec2.tf with internal_web_server module instantiation
-- [ ] T014 [US1] Set instance name to "dev-internal-web-server" in terraform/dev/ec2.tf
-- [ ] T015 [US1] Configure instance to use priv_sub1 subnet in Dev VPC in terraform/dev/ec2.tf
-- [ ] T016 [US1] Set instance_type to t3.small in terraform/dev/ec2.tf
-- [ ] T017 [US1] Reference user-data.sh script from contracts/ directory in terraform/dev/ec2.tf
-- [ ] T018 [US1] Apply mandatory tags (Environment, Project, ManagedBy, Owner, CostCenter, VPC) in terraform/dev/ec2.tf
-- [ ] T019 [US1] Add instance outputs to terraform/dev/outputs.tf (instance_id, private_ip, security_group_id)
-- [ ] T020 [US1] Run terraform fmt, terraform validate in terraform/dev/
+- [X] T013 [US1] Create/update terraform/dev/ec2.tf with internal_web_server module instantiation
+- [X] T014 [US1] Set instance name to "dev-internal-web-server" in terraform/dev/ec2.tf
+- [X] T015 [US1] Configure instance to use priv_sub1 subnet in Dev VPC in terraform/dev/ec2.tf
+- [X] T016 [US1] Set instance_type to t3.small in terraform/dev/ec2.tf
+- [X] T017 [US1] Reference user-data.sh script from contracts/ directory in terraform/dev/ec2.tf
+- [X] T018 [US1] Apply mandatory tags (Environment, Project, ManagedBy, Owner, CostCenter, VPC) in terraform/dev/ec2.tf
+- [X] T019 [US1] Add instance outputs to terraform/dev/outputs.tf (instance_id, private_ip, security_group_id)
+- [X] T020 [US1] Run terraform fmt, terraform validate in terraform/dev/
 - [ ] T021 [US1] Run terraform plan in terraform/dev/ and verify 5 resources to be added
 - [ ] T022 [US1] Run terraform apply in terraform/dev/ to deploy instance
 - [ ] T023 [US1] Verify instance state is "running" via AWS CLI (aws ec2 describe-instances)
