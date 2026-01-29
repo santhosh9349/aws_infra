@@ -10,7 +10,7 @@ on:
       environment:
         description: 'Environment to check for drift'
         required: true
-        default: 'dev'
+        default: 'dev4'
         type: choice
         options:
           - dev
