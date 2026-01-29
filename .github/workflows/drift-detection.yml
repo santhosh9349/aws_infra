@@ -1,0 +1,290 @@
+name: Terraform Drift Detection
+
+on:
+  schedule:
+    # Run at 8:00 AM UTC (9:00 AM BST during summer)
+    - cron: '0 8 * * *'
+  
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to check for drift'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+
+env:
+  TF_VERSION: '1.5.7'
+  AWS_REGION: 'eu-west-2'
+
+jobs:
+  drift-detection:
+    name: Detect Terraform Drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    permissions:
+      id-token: write    # Required for OIDC authentication
+      contents: read     # Required for checkout
+      issues: write      # Required for creating issues
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::017373135945:role/github_oidc_drift
+          role-session-name: DriftDetectionSession
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        id: init
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan (Drift Detection)
+        id: plan
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          set +e
+          MAX_RETRIES=2
+          RETRY_DELAY=300  # 5 minutes
+          
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
+            
+            terraform plan -detailed-exitcode -out=tfplan -input=false 2>&1 | tee /tmp/plan_output.txt
+            EXIT_CODE=${PIPESTATUS[0]}
+            
+            # Check for state lock error
+            if grep -q "Error acquiring the state lock\|Error locking state\|Lock Info:" /tmp/plan_output.txt; then
+              if [ $attempt -lt $MAX_RETRIES ]; then
+                echo "⏳ State lock detected, waiting ${RETRY_DELAY}s before retry..."
+                sleep $RETRY_DELAY
+                continue
+              else
+                echo "❌ State lock persisted after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+            
+            # Process exit code (only reached if no lock error)
+            break
+          done
+          
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ No drift detected - infrastructure matches Terraform state"
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          elif [ $EXIT_CODE -eq 1 ]; then
+            echo "❌ Terraform plan failed with an error"
+            exit 1
+          elif [ $EXIT_CODE -eq 2 ]; then
+            echo "⚠️ Drift detected - infrastructure differs from Terraform state"
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      - name: Check for plan errors
+        if: steps.plan.outputs.exit_code == '1'
+        run: |
+          echo "::error::Terraform plan failed. Check the logs above for details."
+          exit 1
+
+      - name: Export plan to JSON
+        id: show
+        if: steps.plan.outputs.drift_detected == 'true'
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          terraform show -json tfplan > plan.json
+          echo "Plan exported to JSON for processing"
+
+      - name: Parse drifted resources
+        id: parse
+        if: steps.plan.outputs.drift_detected == 'true'
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          chmod +x ../../scripts/drift-detection/parse-terraform-plan.sh
+          ../../scripts/drift-detection/parse-terraform-plan.sh plan.json
+
+      - name: Query CloudTrail for attribution
+        id: cloudtrail
+        if: steps.plan.outputs.drift_detected == 'true'
+        run: |
+          chmod +x scripts/drift-detection/query-cloudtrail.sh
+          scripts/drift-detection/query-cloudtrail.sh
+
+      - name: Generate issue body
+        id: issue_body
+        if: steps.plan.outputs.drift_detected == 'true'
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          # Generate issue body from template
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          # Count changes
+          CREATE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["create"]))] | length' plan.json)
+          UPDATE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["update"]))] | length' plan.json)
+          DELETE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["delete"]))] | length' plan.json)
+          REPLACE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["delete", "create"]))] | length' plan.json)
+          TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT))
+          
+          # Build resource table from parsed output
+          RESOURCE_TABLE=""
+          if [ -f /tmp/drift_resources.txt ]; then
+            while IFS='|' read -r address action resource_type iam_user event_time; do
+              case "$action" in
+                *create*) EMOJI="🆕" ;;
+                *update*) EMOJI="📝" ;;
+                *delete*) EMOJI="🗑️" ;;
+                *) EMOJI="🔄" ;;
+              esac
+              RESOURCE_TABLE="${RESOURCE_TABLE}| \`${address}\` | ${EMOJI} ${action} | \`${iam_user}\` | ${event_time} |"$'\n'
+            done < /tmp/drift_resources.txt
+          fi
+          
+          # Get plan text output (truncated)
+          PLAN_OUTPUT=$(terraform show tfplan 2>/dev/null | head -200)
+          
+          # Create issue body
+          cat > /tmp/issue_body.md << EOF
+          ## Drift Detection Report
+
+          | Field | Value |
+          |-------|-------|
+          | **Environment** | ${ENVIRONMENT} |
+          | **Detected At** | ${TIMESTAMP} |
+          | **Workflow Run** | [${RUN_ID}](${RUN_URL}) |
+
+          ---
+
+          ### Summary
+
+          | Metric | Count |
+          |--------|-------|
+          | 🆕 Creates | ${CREATE_COUNT} |
+          | 📝 Updates | ${UPDATE_COUNT} |
+          | 🗑️ Deletes | ${DELETE_COUNT} |
+          | 🔄 Replaces | ${REPLACE_COUNT} |
+          | **Total** | **${TOTAL_COUNT}** |
+
+          ---
+
+          ### Changed Resources
+
+          | Resource Address | Change | IAM User | Timestamp |
+          |-----------------|--------|----------|-----------|
+          ${RESOURCE_TABLE}
+
+          > ℹ️ **Note**: Attribution shows the most recent CloudTrail event for each resource.
+          > Events older than 90 days cannot be queried.
+
+          ---
+
+          ### Terraform Plan Diff
+
+          <details>
+          <summary>Click to expand full plan output</summary>
+
+          \`\`\`hcl
+          ${PLAN_OUTPUT}
+          \`\`\`
+
+          </details>
+
+          ---
+
+          ### Remediation Options
+
+          #### Option 1: Accept Drift (Update Terraform)
+          \`\`\`bash
+          cd terraform/${ENVIRONMENT}
+          terraform plan
+          \`\`\`
+
+          #### Option 2: Revert Drift (Apply Terraform)
+          \`\`\`bash
+          cd terraform/${ENVIRONMENT}
+          terraform apply
+          \`\`\`
+
+          ---
+
+          *This issue was automatically created by the [drift detection workflow](${RUN_URL}).*
+          EOF
+          
+          echo "Issue body generated"
+
+      - name: Create GitHub Issue
+        id: create_issue
+        if: steps.plan.outputs.drift_detected == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          DATE=$(date -u +"%Y-%m-%d")
+          ISSUE_URL=$(gh issue create \
+            --title "🔴 Terraform Drift Detected - ${ENVIRONMENT} - ${DATE}" \
+            --body-file /tmp/issue_body.md \
+            --label "drift,infrastructure,automated,${ENVIRONMENT}")
+          
+          echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
+          echo "✅ Created issue: $ISSUE_URL"
+
+      - name: Send Teams notification
+        if: steps.plan.outputs.drift_detected == 'true' && steps.create_issue.outputs.issue_url != ''
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          ISSUE_URL: ${{ steps.create_issue.outputs.issue_url }}
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          chmod +x scripts/drift-detection/format-teams-card.sh
+          
+          # Generate Teams card JSON
+          TEAMS_PAYLOAD=$(scripts/drift-detection/format-teams-card.sh)
+          
+          # Send to Teams
+          RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/teams_response.txt \
+            -H "Content-Type: application/json" \
+            -d "$TEAMS_PAYLOAD" \
+            "$TEAMS_WEBHOOK_URL")
+          
+          if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "202" ]; then
+            echo "✅ Teams notification sent successfully"
+          else
+            echo "⚠️ Teams notification failed with status $RESPONSE"
+            cat /tmp/teams_response.txt
+            # Don't fail the workflow for notification failures
+          fi
+
+      - name: Workflow Summary
+        run: |
+          if [ "${{ steps.plan.outputs.drift_detected }}" = "true" ]; then
+            echo "## ⚠️ Drift Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Infrastructure drift was detected in the **${{ github.event.inputs.environment || 'dev' }}** environment." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📋 **Issue Created**: ${{ steps.create_issue.outputs.issue_url }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ✅ No Drift Detected" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Infrastructure in **${{ github.event.inputs.environment || 'dev' }}** matches the Terraform state." >> $GITHUB_STEP_SUMMARY
+          fi
