@@ -1,9 +1,9 @@
-# Terraform files
+# Terraform
 .terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
-*.tfvars.json
+!terraform.tfvars.example
 .terraform.lock.hcl
 crash.log
 crash.*.log
@@ -11,37 +11,53 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-.terraformrc
-terraform.rc
 
-# Plan files
-*.tfplan
-plan.json
-tfplan
+# Environment variables
+.env
+.env.*
+*.env
 
-# Sensitive variable files
-*.auto.tfvars
-*.auto.tfvars.json
-
-# IDE and editor files
-.vscode/settings.json
+# IDE
+.vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# OS files
 .DS_Store
 Thumbs.db
 
-# Log files
+# Logs
 *.log
-
-# Environment files
-.env
-.env.*
-!.env.example
+*.log.*
 
 # Temporary files
 *.tmp
-*.temp
+*.bak
+*.backup
+
+# SSH keys
+*.pem
+*.key
+id_rsa*
+
+# Sensitive data
+secrets/
+*.secret
+credentials
+
+# Python (for scripts)
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# Node.js (if used)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
