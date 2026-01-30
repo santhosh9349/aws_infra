@@ -118,21 +118,40 @@ jobs:
           # Extract resource changes from plan output
           grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt || true
           
-          # Count changes
-          CREATE_COUNT=$(grep -c "will be created" /tmp/drift_resources.txt 2>/dev/null || echo "0")
-          UPDATE_COUNT=$(grep -c "will be updated" /tmp/drift_resources.txt 2>/dev/null || echo "0")
-          DELETE_COUNT=$(grep -c "will be destroyed" /tmp/drift_resources.txt 2>/dev/null || echo "0")
-          REPLACE_COUNT=$(grep -c "must be replaced" /tmp/drift_resources.txt 2>/dev/null || echo "0")
+          # Count changes safely - grep -c returns 1 if no matches, so we capture and default
+          CREATE_COUNT="0"
+          UPDATE_COUNT="0"
+          DELETE_COUNT="0"
+          REPLACE_COUNT="0"
           
-          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
-          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
-          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
-          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
+          if [ -f /tmp/drift_resources.txt ]; then
+            CREATE_COUNT=$(grep -c "will be created" /tmp/drift_resources.txt || echo "0")
+            UPDATE_COUNT=$(grep -c "will be updated" /tmp/drift_resources.txt || echo "0")
+            DELETE_COUNT=$(grep -c "will be destroyed" /tmp/drift_resources.txt || echo "0")
+            REPLACE_COUNT=$(grep -c "must be replaced" /tmp/drift_resources.txt || echo "0")
+          fi
+          
+          # Strip any whitespace and ensure integers
+          CREATE_COUNT=$(echo "$CREATE_COUNT" | tr -d '[:space:]')
+          UPDATE_COUNT=$(echo "$UPDATE_COUNT" | tr -d '[:space:]')
+          DELETE_COUNT=$(echo "$DELETE_COUNT" | tr -d '[:space:]')
+          REPLACE_COUNT=$(echo "$REPLACE_COUNT" | tr -d '[:space:]')
+          
+          # Default to 0 if empty
+          : ${CREATE_COUNT:=0}
+          : ${UPDATE_COUNT:=0}
+          : ${DELETE_COUNT:=0}
+          : ${REPLACE_COUNT:=0}
+          
+          echo "create_count=${CREATE_COUNT}" >> $GITHUB_OUTPUT
+          echo "update_count=${UPDATE_COUNT}" >> $GITHUB_OUTPUT
+          echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
+          echo "replace_count=${REPLACE_COUNT}" >> $GITHUB_OUTPUT
           
           TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT + REPLACE_COUNT))
-          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=${TOTAL_COUNT}" >> $GITHUB_OUTPUT
           
-          echo "📊 Drift summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replaces"
+          echo "📊 Drift summary: ${CREATE_COUNT} creates, ${UPDATE_COUNT} updates, ${DELETE_COUNT} deletes, ${REPLACE_COUNT} replaces"
 
       - name: Query CloudTrail for attribution
         id: cloudtrail
