@@ -1,5 +1,7 @@
 # AWS Infrastructure with Terraform
 
+[![Terraform Drift Detection](https://github.com/santhosh9349/aws_infra/actions/workflows/drift-detection.yml/badge.svg)](https://github.com/santhosh9349/aws_infra/actions/workflows/drift-detection.yml)
+
 This repository contains Terraform configurations for deploying AWS infrastructure, including VPCs, subnets, EC2 instances, and Transit Gateways (TGW) with Resource Access Manager (RAM) sharing.
 
 ## Project Structure
@@ -46,8 +48,86 @@ This repository contains Terraform configurations for deploying AWS infrastructu
 
 After deployment, key outputs include VPC IDs, subnet IDs, TGW ID, and RAM share ARN.
 
+## Drift Detection & Notifications
+
+This repository includes automated infrastructure drift detection with Telegram notifications.
+
+### Features
+
+- **Scheduled Drift Detection**: Daily checks at 6 AM UTC
+- **Manual Trigger**: Run drift detection on-demand via GitHub Actions
+- **Telegram Notifications**: Instant alerts when infrastructure drift is detected
+- **Detailed Reports**: Message includes affected resources, change types, and workflow links
+
+### Setup
+
+1. Configure Telegram bot and channel (see [docs/drift-detection/telegram-setup.md](docs/drift-detection/telegram-setup.md))
+2. Add GitHub secrets:
+   - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token
+   - `TELEGRAM_CHANNEL_ID`: Target channel ID or username
+3. The drift detection workflow will run automatically on schedule
+
+### Manual Execution
+
+1. Go to **Actions** → **Infrastructure Drift Detection**
+2. Click **Run workflow**
+3. Select environment (dev/prod)
+4. Optionally enable notifications for no-drift results
+
 ## Contributing
 
 1. Fork the repository.
 2. Create a feature branch.
 3. Submit a pull request.
+
+## Drift Detection
+
+This repository includes automated infrastructure drift detection via GitHub Actions.
+
+### Overview
+
+The drift detection workflow:
+- **Schedule**: Runs daily at 9:00 AM BST (8:00 AM UTC)
+- **Manual Trigger**: Can be triggered on-demand via `workflow_dispatch`
+- **Authentication**: Uses OIDC to assume AWS IAM role (no static credentials)
+
+### What It Does
+
+1. **Detects Drift**: Runs `terraform plan -detailed-exitcode` to identify changes
+2. **Creates Issues**: When drift is detected, creates a GitHub Issue with:
+   - Resource change summary (creates, updates, deletes)
+   - IAM user attribution from CloudTrail logs
+   - Terraform plan diff
+   - Remediation options
+3. **Teams Notification**: Sends an Adaptive Card to the `Drift_notification_tf` channel
+
+### Exit Codes
+
+| Exit Code | Meaning | Action |
+|-----------|---------|--------|
+| 0 | No drift | Success, no notification |
+| 1 | Plan error | Workflow fails |
+| 2 | Drift detected | Creates issue + Teams alert |
+
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `TF_API_TOKEN` | Terraform Cloud API token for state access |
+| `TEAMS_WEBHOOK_URL` | Microsoft Teams incoming webhook URL |
+
+### Manual Testing
+
+Trigger manually via GitHub Actions UI:
+
+```bash
+gh workflow run drift-detection.yml -f environment=dev
+```
+
+### Related Files
+
+- `.github/workflows/drift-detection.yml` - Main workflow
+- `scripts/drift-detection/` - Supporting scripts
+  - `parse-terraform-plan.sh` - Extracts changed resources
+  - `query-cloudtrail.sh` - IAM attribution lookup
+  - `format-teams-card.sh` - Teams Adaptive Card generator
