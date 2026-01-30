@@ -1,0 +1,5 @@
+# Core dependencies for Telegram drift notifications
+python-telegram-bot==20.7
+tenacity==8.2.3
+pydantic==2.5.0
+python-dotenv==1.0.0

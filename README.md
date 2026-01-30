@@ -48,6 +48,32 @@ This repository contains Terraform configurations for deploying AWS infrastructu
 
 After deployment, key outputs include VPC IDs, subnet IDs, TGW ID, and RAM share ARN.
 
+## Drift Detection & Notifications
+
+This repository includes automated infrastructure drift detection with Telegram notifications.
+
+### Features
+
+- **Scheduled Drift Detection**: Daily checks at 6 AM UTC
+- **Manual Trigger**: Run drift detection on-demand via GitHub Actions
+- **Telegram Notifications**: Instant alerts when infrastructure drift is detected
+- **Detailed Reports**: Message includes affected resources, change types, and workflow links
+
+### Setup
+
+1. Configure Telegram bot and channel (see [docs/drift-detection/telegram-setup.md](docs/drift-detection/telegram-setup.md))
+2. Add GitHub secrets:
+   - `TELEGRAM_BOT_TOKEN`: Your Telegram bot token
+   - `TELEGRAM_CHANNEL_ID`: Target channel ID or username
+3. The drift detection workflow will run automatically on schedule
+
+### Manual Execution
+
+1. Go to **Actions** → **Infrastructure Drift Detection**
+2. Click **Run workflow**
+3. Select environment (dev/prod)
+4. Optionally enable notifications for no-drift results
+
 ## Contributing
 
 1. Fork the repository.
