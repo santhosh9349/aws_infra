@@ -7,7 +7,7 @@ This repository manages AWS infrastructure deployment using Infrastructure as Co
 ### Infrastructure
 - **Terraform v1.5.x** for declarative infrastructure management
 - **AWS Provider 5.x** for AWS resource provisioning
-- **AWS Services**: VPC (multi-VPC architecture), Transit Gateway (full mesh connectivity), Subnets, Route Tables, Internet Gateways, EC2, Security Groups
+- **AWS Services**: VPC (multi-VPC architecture), Transit Gateway (full mesh connectivity), Subnets, Route Tables, Internet Gateways, EC2, Security Groups, IAM (Roles, Policies, Instance Profiles), Systems Manager (Session Manager for no-SSH management)
 - **State Management**: Terraform Cloud (remote state, no local state management)
 - **Architecture**: Multi-VPC setup with Transit Gateway hub for inter-VPC communication
   - Inspection VPC (192.0.0.0/16) - Network inspection/firewall

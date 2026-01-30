@@ -3,55 +3,61 @@
 *.tfstate
 *.tfstate.*
 *.tfvars
+!terraform.tfvars.example
 .terraform.lock.hcl
 crash.log
 crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-venv/
-.venv/
-ENV/
-
-# Environment files
+# Environment variables
 .env
-.env.local
-.env.*.local
-scripts/drift-detection/.env
+.env.*
+*.env
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
 
 # Logs
 *.log
+*.log.*
 
 # Temporary files
 *.tmp
-*.temp
+*.bak
+*.backup
+
+# SSH keys
+*.pem
+*.key
+id_rsa*
+
+# Sensitive data
+secrets/
+*.secret
+credentials
+
+# Python (for scripts)
+__pycache__/
+*.pyc
+*.pyo
+.Python
+venv/
+.venv/
+*.egg-info/
+
+# Node.js (if used)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

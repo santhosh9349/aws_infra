@@ -1,5 +1,7 @@
 # AWS Infrastructure with Terraform
 
+[![Terraform Drift Detection](https://github.com/santhosh9349/aws_infra/actions/workflows/drift-detection.yml/badge.svg)](https://github.com/santhosh9349/aws_infra/actions/workflows/drift-detection.yml)
+
 This repository contains Terraform configurations for deploying AWS infrastructure, including VPCs, subnets, EC2 instances, and Transit Gateways (TGW) with Resource Access Manager (RAM) sharing.
 
 ## Project Structure
@@ -77,3 +79,55 @@ This repository includes automated infrastructure drift detection with Telegram 
 1. Fork the repository.
 2. Create a feature branch.
 3. Submit a pull request.
+
+## Drift Detection
+
+This repository includes automated infrastructure drift detection via GitHub Actions.
+
+### Overview
+
+The drift detection workflow:
+- **Schedule**: Runs daily at 9:00 AM BST (8:00 AM UTC)
+- **Manual Trigger**: Can be triggered on-demand via `workflow_dispatch`
+- **Authentication**: Uses OIDC to assume AWS IAM role (no static credentials)
+
+### What It Does
+
+1. **Detects Drift**: Runs `terraform plan -detailed-exitcode` to identify changes
+2. **Creates Issues**: When drift is detected, creates a GitHub Issue with:
+   - Resource change summary (creates, updates, deletes)
+   - IAM user attribution from CloudTrail logs
+   - Terraform plan diff
+   - Remediation options
+3. **Teams Notification**: Sends an Adaptive Card to the `Drift_notification_tf` channel
+
+### Exit Codes
+
+| Exit Code | Meaning | Action |
+|-----------|---------|--------|
+| 0 | No drift | Success, no notification |
+| 1 | Plan error | Workflow fails |
+| 2 | Drift detected | Creates issue + Teams alert |
+
+### Required Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `TF_API_TOKEN` | Terraform Cloud API token for state access |
+| `TEAMS_WEBHOOK_URL` | Microsoft Teams incoming webhook URL |
+
+### Manual Testing
+
+Trigger manually via GitHub Actions UI:
+
+```bash
+gh workflow run drift-detection.yml -f environment=dev
+```
+
+### Related Files
+
+- `.github/workflows/drift-detection.yml` - Main workflow
+- `scripts/drift-detection/` - Supporting scripts
+  - `parse-terraform-plan.sh` - Extracts changed resources
+  - `query-cloudtrail.sh` - IAM attribution lookup
+  - `format-teams-card.sh` - Teams Adaptive Card generator
