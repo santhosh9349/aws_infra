@@ -1,0 +1,188 @@
+name: Infrastructure Drift Detection
+
+on:
+  # Run on schedule (daily at 6 AM UTC)
+  schedule:
+    - cron: '0 6 * * *'
+  
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to check for drift'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - prod
+      notify_no_drift:
+        description: 'Send notification even if no drift detected'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TF_VERSION: '1.5.7'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  detect-drift:
+    name: Detect Infrastructure Drift
+    runs-on: ubuntu-latest
+    
+    outputs:
+      drift_detected: ${{ steps.drift.outputs.drift_detected }}
+      drift_report: ${{ steps.drift.outputs.drift_report }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      
+      - name: Terraform Init
+        id: init
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: terraform init -input=false
+      
+      - name: Detect Drift
+        id: drift
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          # Run terraform plan and capture output
+          set +e
+          terraform plan -detailed-exitcode -out=tfplan -input=false 2>&1 | tee plan_output.txt
+          EXIT_CODE=$?
+          set -e
+          
+          # Exit codes: 0 = no changes, 1 = error, 2 = changes detected
+          if [ $EXIT_CODE -eq 2 ]; then
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            
+            # Generate JSON plan for parsing
+            terraform show -json tfplan > drift_report.json
+            
+            # Create simplified drift report
+            python3 << 'EOF'
+          import json
+          from datetime import datetime
+          
+          with open('drift_report.json', 'r') as f:
+              plan = json.load(f)
+          
+          resource_changes = []
+          for change in plan.get('resource_changes', []):
+              if change.get('change', {}).get('actions', ['no-op']) != ['no-op']:
+                  resource_changes.append({
+                      'resource_type': change.get('type', 'unknown'),
+                      'resource_name': change.get('name', 'unknown'),
+                      'action': change.get('change', {}).get('actions', ['update'])[0],
+                      'before': change.get('change', {}).get('before'),
+                      'after': change.get('change', {}).get('after'),
+                  })
+          
+          report = {
+              'timestamp': datetime.utcnow().isoformat() + 'Z',
+              'environment': '${{ github.event.inputs.environment || 'dev' }}',
+              'branch': '${{ github.ref_name }}',
+              'workflow_run_id': '${{ github.run_id }}',
+              'workflow_run_url': '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+              'drift_detected': True,
+              'resource_changes': resource_changes,
+          }
+          
+          with open('drift_notification.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          
+          print(f"Drift detected: {len(resource_changes)} resource(s) changed")
+          EOF
+            
+            echo "drift_report=${{ github.workspace }}/terraform/${{ github.event.inputs.environment || 'dev' }}/drift_notification.json" >> $GITHUB_OUTPUT
+            
+          elif [ $EXIT_CODE -eq 0 ]; then
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            
+            # Create no-drift report
+            python3 << 'EOF'
+          import json
+          from datetime import datetime
+          
+          report = {
+              'timestamp': datetime.utcnow().isoformat() + 'Z',
+              'environment': '${{ github.event.inputs.environment || 'dev' }}',
+              'branch': '${{ github.ref_name }}',
+              'workflow_run_id': '${{ github.run_id }}',
+              'workflow_run_url': '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+              'drift_detected': False,
+              'resource_changes': [],
+          }
+          
+          with open('drift_notification.json', 'w') as f:
+              json.dump(report, f, indent=2)
+          
+          print("No drift detected")
+          EOF
+            
+            echo "drift_report=${{ github.workspace }}/terraform/${{ github.event.inputs.environment || 'dev' }}/drift_notification.json" >> $GITHUB_OUTPUT
+            
+          else
+            echo "Terraform plan failed with exit code $EXIT_CODE"
+            exit 1
+          fi
+      
+      - name: Upload drift report
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report
+          path: terraform/${{ github.event.inputs.environment || 'dev' }}/drift_notification.json
+          retention-days: 7
+
+  notify-telegram:
+    name: Send Telegram Notification
+    runs-on: ubuntu-latest
+    needs: detect-drift
+    # Only run if drift detected OR if user requested notification regardless
+    if: needs.detect-drift.outputs.drift_detected == 'true' || github.event.inputs.notify_no_drift == 'true'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download drift report
+        uses: actions/download-artifact@v4
+        with:
+          name: drift-report
+          path: ./drift-report
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r scripts/drift-detection/requirements.txt
+      
+      - name: Send Telegram Notification
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TELEGRAM_MAX_RETRIES: '3'
+          TELEGRAM_NOTIFY_NO_DRIFT: ${{ github.event.inputs.notify_no_drift || 'false' }}
+        run: |
+          python -m scripts.drift-detection.notify_telegram \
+            --report ./drift-report/drift_notification.json \
+            --environment ${{ github.event.inputs.environment || 'dev' }} \
+            --run-id ${{ github.run_id }}
