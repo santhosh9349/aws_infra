@@ -63,9 +63,10 @@ jobs:
           RETRY_DELAY=300  # 5 minutes
           
           for attempt in $(seq 1 $MAX_RETRIES); do
-            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
+            echo "🔄 Terraform plann attempt $attempt of $MAX_RETRIES"
             
-            terraform plan -detailed-exitcode -out=tfplan -input=false 2>&1 | tee /tmp/plan_output.txt
+            # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
+            terraform plan -detailed-exitcode -input=false 2>&1 | tee /tmp/plan_output.txt
             EXIT_CODE=${PIPESTATUS[0]}
             
             # Check for state lock error
@@ -86,6 +87,9 @@ jobs:
           
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           
+          # Save plan output for later use
+          cp /tmp/plan_output.txt ${{ github.workspace }}/plan_output.txt
+          
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ No drift detected - infrastructure matches Terraform state"
             echo "drift_detected=false" >> $GITHUB_OUTPUT
@@ -104,28 +108,42 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
-      - name: Export plan to JSON
-        id: show
-        if: steps.plan.outputs.drift_detected == 'true'
-        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
-        run: |
-          terraform show -json tfplan > plan.json
-          echo "Plan exported to JSON for processing"
-
-      - name: Parse drifted resources
+      - name: Parse drift from plan output
         id: parse
         if: steps.plan.outputs.drift_detected == 'true'
-        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          chmod +x ../../scripts/drift-detection/parse-terraform-plan.sh
-          ../../scripts/drift-detection/parse-terraform-plan.sh plan.json
+          # Parse the plan text output to identify changed resources
+          echo "Parsing drift from plan output..."
+          
+          # Extract resource changes from plan output
+          grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt || true
+          
+          # Count changes
+          CREATE_COUNT=$(grep -c "will be created" /tmp/drift_resources.txt 2>/dev/null || echo "0")
+          UPDATE_COUNT=$(grep -c "will be updated" /tmp/drift_resources.txt 2>/dev/null || echo "0")
+          DELETE_COUNT=$(grep -c "will be destroyed" /tmp/drift_resources.txt 2>/dev/null || echo "0")
+          REPLACE_COUNT=$(grep -c "must be replaced" /tmp/drift_resources.txt 2>/dev/null || echo "0")
+          
+          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
+          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
+          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
+          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
+          
+          TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT + REPLACE_COUNT))
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "📊 Drift summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replaces"
 
       - name: Query CloudTrail for attribution
         id: cloudtrail
         if: steps.plan.outputs.drift_detected == 'true'
         run: |
-          chmod +x scripts/drift-detection/query-cloudtrail.sh
-          scripts/drift-detection/query-cloudtrail.sh
+          if [ -f scripts/drift-detection/query-cloudtrail.sh ]; then
+            chmod +x scripts/drift-detection/query-cloudtrail.sh
+            scripts/drift-detection/query-cloudtrail.sh || true
+          else
+            echo "CloudTrail query script not found, skipping attribution"
+          fi
 
       - name: Generate issue body
         id: issue_body
@@ -134,34 +152,16 @@ jobs:
           ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+          CREATE_COUNT: ${{ steps.parse.outputs.create_count }}
+          UPDATE_COUNT: ${{ steps.parse.outputs.update_count }}
+          DELETE_COUNT: ${{ steps.parse.outputs.delete_count }}
+          REPLACE_COUNT: ${{ steps.parse.outputs.replace_count }}
+          TOTAL_COUNT: ${{ steps.parse.outputs.total_count }}
         run: |
-          # Generate issue body from template
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           
-          # Count changes
-          CREATE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["create"]))] | length' plan.json)
-          UPDATE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["update"]))] | length' plan.json)
-          DELETE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["delete"]))] | length' plan.json)
-          REPLACE_COUNT=$(jq '[.resource_changes[] | select(.change.actions | contains(["delete", "create"]))] | length' plan.json)
-          TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT))
-          
-          # Build resource table from parsed output
-          RESOURCE_TABLE=""
-          if [ -f /tmp/drift_resources.txt ]; then
-            while IFS='|' read -r address action resource_type iam_user event_time; do
-              case "$action" in
-                *create*) EMOJI="🆕" ;;
-                *update*) EMOJI="📝" ;;
-                *delete*) EMOJI="🗑️" ;;
-                *) EMOJI="🔄" ;;
-              esac
-              RESOURCE_TABLE="${RESOURCE_TABLE}| \`${address}\` | ${EMOJI} ${action} | \`${iam_user}\` | ${event_time} |"$'\n'
-            done < /tmp/drift_resources.txt
-          fi
-          
           # Get plan text output (truncated)
-          PLAN_OUTPUT=$(terraform show tfplan 2>/dev/null | head -200)
+          PLAN_OUTPUT=$(head -200 ${{ github.workspace }}/plan_output.txt)
           
           # Create issue body
           cat > /tmp/issue_body.md << EOF
@@ -187,18 +187,7 @@ jobs:
 
           ---
 
-          ### Changed Resources
-
-          | Resource Address | Change | IAM User | Timestamp |
-          |-----------------|--------|----------|-----------|
-          ${RESOURCE_TABLE}
-
-          > ℹ️ **Note**: Attribution shows the most recent CloudTrail event for each resource.
-          > Events older than 90 days cannot be queried.
-
-          ---
-
-          ### Terraform Plan Diff
+          ### Terraform Plan Output
 
           <details>
           <summary>Click to expand full plan output</summary>
