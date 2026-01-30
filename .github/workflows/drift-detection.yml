@@ -63,7 +63,7 @@ jobs:
           RETRY_DELAY=300  # 5 minutes
           
           for attempt in $(seq 1 $MAX_RETRIES); do
-            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
+            echo "🔄 Terraform plann attempt $attempt of $MAX_RETRIES"
             
             # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
             terraform plan -detailed-exitcode -input=false 2>&1 | tee /tmp/plan_output.txt
