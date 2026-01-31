@@ -65,7 +65,7 @@ jobs:
             echo "🔄 Terraform plann attempt $attempt of $MAX_RETRIES"
             
             # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
-            terraform plan -detailed-exitcode -input=false 2>&1 | tee /tmp/plan_output.txt
+            terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
             EXIT_CODE=${PIPESTATUS[0]}
             
             # Check for state lock error
