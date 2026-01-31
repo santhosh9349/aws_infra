@@ -1,9 +1,8 @@
 name: Terraform Drift Detection
 
 on:
-  schedule:
-    # Run at 8:00 AM UTC (9:00 AM BST during summer)
-    - cron: '0 8 * * *'
+  repository_dispatch:
+    types: [drift-check]
   
   workflow_dispatch:
     inputs:
@@ -115,43 +114,50 @@ jobs:
           # Parse the plan text output to identify changed resources
           echo "Parsing drift from plan output..."
           
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
+          DRIFT_FILE="/tmp/drift_resources.txt"
+          
           # Extract resource changes from plan output
-          grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt || true
+          # Look for lines starting with "  # " and containing action keywords
+          grep -E "^  # .* (will be|must be)" "$PLAN_FILE" > "$DRIFT_FILE" || touch "$DRIFT_FILE"
           
-          # Count changes safely - grep -c returns 1 if no matches, so we capture and default
-          CREATE_COUNT="0"
-          UPDATE_COUNT="0"
-          DELETE_COUNT="0"
-          REPLACE_COUNT="0"
+          # Function to safe count matches
+          count_matches() {
+            grep -c "$1" "$DRIFT_FILE" || echo "0"
+          }
           
-          if [ -f /tmp/drift_resources.txt ]; then
-            CREATE_COUNT=$(grep -c "will be created" /tmp/drift_resources.txt || echo "0")
-            UPDATE_COUNT=$(grep -c "will be updated" /tmp/drift_resources.txt || echo "0")
-            DELETE_COUNT=$(grep -c "will be destroyed" /tmp/drift_resources.txt || echo "0")
-            REPLACE_COUNT=$(grep -c "must be replaced" /tmp/drift_resources.txt || echo "0")
-          fi
+          # Get raw counts
+          raw_create=$(count_matches "will be created")
+          raw_update=$(count_matches "will be updated")
+          raw_delete=$(count_matches "will be destroyed")
+          raw_replace=$(count_matches "must be replaced")
           
-          # Strip any whitespace and ensure integers
-          CREATE_COUNT=$(echo "$CREATE_COUNT" | tr -d '[:space:]')
-          UPDATE_COUNT=$(echo "$UPDATE_COUNT" | tr -d '[:space:]')
-          DELETE_COUNT=$(echo "$DELETE_COUNT" | tr -d '[:space:]')
-          REPLACE_COUNT=$(echo "$REPLACE_COUNT" | tr -d '[:space:]')
+          # Sanitize (remove whitespace)
+          CREATE_COUNT=$(echo "$raw_create" | tr -d '[:space:]')
+          UPDATE_COUNT=$(echo "$raw_update" | tr -d '[:space:]')
+          DELETE_COUNT=$(echo "$raw_delete" | tr -d '[:space:]')
+          REPLACE_COUNT=$(echo "$raw_replace" | tr -d '[:space:]')
           
-          # Default to 0 if empty
-          : ${CREATE_COUNT:=0}
-          : ${UPDATE_COUNT:=0}
-          : ${DELETE_COUNT:=0}
-          : ${REPLACE_COUNT:=0}
+          # Ensure defaults (strip leading zeros to avoid octal interpretation, but keep single 0)
+          # actually bash handles 09 as octal, so 10-base force is tricky in $(( )).
+          # simple way: assume grep -c returns straight decimal.
           
-          echo "create_count=${CREATE_COUNT}" >> $GITHUB_OUTPUT
-          echo "update_count=${UPDATE_COUNT}" >> $GITHUB_OUTPUT
-          echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
-          echo "replace_count=${REPLACE_COUNT}" >> $GITHUB_OUTPUT
+          [ -z "$CREATE_COUNT" ] && CREATE_COUNT=0
+          [ -z "$UPDATE_COUNT" ] && UPDATE_COUNT=0
+          [ -z "$DELETE_COUNT" ] && DELETE_COUNT=0
+          [ -z "$REPLACE_COUNT" ] && REPLACE_COUNT=0
           
-          TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT + REPLACE_COUNT))
-          echo "total_count=${TOTAL_COUNT}" >> $GITHUB_OUTPUT
+          # Calculate total using let or expr to avoid syntax errors with edge cases
+          TOTAL_COUNT=$(( 10#$CREATE_COUNT + 10#$UPDATE_COUNT + 10#$DELETE_COUNT + 10#$REPLACE_COUNT ))
           
-          echo "📊 Drift summary: ${CREATE_COUNT} creates, ${UPDATE_COUNT} updates, ${DELETE_COUNT} deletes, ${REPLACE_COUNT} replaces"
+          # Output to GitHub Action
+          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
+          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
+          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
+          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "📊 Drift summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replaces"
 
       - name: Query CloudTrail for attribution
         id: cloudtrail
