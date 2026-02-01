@@ -22,21 +22,24 @@ def run_command(command: List[str]) -> Optional[str]:
 def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
     """Get resource ID from Terraform state."""
     logger.info(f"Looking up state for {address}...")
-    # usage: terraform state show -json address
-    cmd = ["terraform", "state", "show", "-no-color", "-json", address]
+    
+    # NOTE: terraform state show does NOT support -json flag in versions < 1.7 (approx)
+    # The error "flag provided but not defined: -json" confirms this.
+    # We will use plain text format and regex to extract ID.
+    
+    cmd = ["terraform", "state", "show", "-no-color", address]
     output = run_command(cmd) # Executing inside the terraform dir
     
     if output:
-        try:
-            data = json.loads(output)
-            # Try common ID fields
-            res_id = data.get("values", {}).get("id")
-            if not res_id:
-                res_id = data.get("values", {}).get("attributes", {}).get("id")
-            return res_id
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse state JSON for {address}")
-    
+        # Look for "id = ..." line
+        m = re.search(r'\n\s+id\s+=\s+"([^"]+)"', output)
+        if m:
+            return m.group(1)
+            
+        # Fallback: sometimes attributes have different names, but 'id' is standard for resources
+        # If simple regex fails, we can try to find the specific AWS resource ID pattern if known,
+        # but 'id' attribute is the most reliable cross-resource key in state show output.
+        
     return None
 
 def lookup_cloudtrail_event(resource_id: str) -> Dict[str, str]:
