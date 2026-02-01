@@ -176,6 +176,8 @@ jobs:
       - name: Query CloudTrail for attribution
         id: cloudtrail
         if: steps.plan.outputs.drift_detected == 'true'
+        env:
+          TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
         run: |
           echo "Running attribution analysis..."
           python scripts/drift-detection/lookup_drift_details.py \
