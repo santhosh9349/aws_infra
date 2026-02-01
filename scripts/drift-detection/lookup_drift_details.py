@@ -36,6 +36,15 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
     # Pass cwd=working_dir to subprocess to ensuring we run inside the terraform module folder
     # where .terraform folder exists (from 'terraform init').
     try:
+        # Use simple Popen or run? subprocess.run is fine.
+        # Ensure we are using absolute path for safety if provided?
+        # Actually, if we are inside the dir, we can just omit cwd or pass "."
+        # But let's verify if 'working_dir' is actually correct.
+        
+        # NOTE: When using remote state (Terraform Cloud), 'terraform init' creates a .terraform/terraform.tfstate
+        # which contains the connection info.
+        
+        # If shell=True, arguments must be a string. We used list which is safe.
         result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=working_dir)
         output = result.stdout.strip()
     except subprocess.CalledProcessError as e:
@@ -138,10 +147,16 @@ def main():
     results = []
     
     import os
-    original_cwd = os.getcwd()
     
     # Priority list for display
     PRIORITY_TYPES = ["aws_instance", "aws_s3_bucket", "aws_rds_cluster", "aws_db_instance", "aws_security_group"]
+    
+    if os.path.exists(os.path.join(args.terraform_dir, ".terraform")):
+        logger.info(f"Verified .terraform directory exists in {args.terraform_dir}")
+    else:
+        logger.warning(f".terraform directory NOT found in {args.terraform_dir} - remote state lookup will likely fail!")
+
+    original_cwd = os.getcwd()
     
     try:
         os.chdir(args.terraform_dir)
@@ -161,17 +176,11 @@ def main():
             
             # Fallback to state lookup (unlikely to work for drift, but good for updates)
             if not res_id:
-               # Ensure we pass the absolute path to working_dir if possible, or assume it's relative
-               # In main() we chdir'd but get_resource_id_from_state now takes working_dir arg and uses it as cwd
-               # but wait, if we already os.chdir(args.terraform_dir) in main loop,
-               # then passing args.terraform_dir (which might be relative like 'terraform/dev') to cwd=... in subprocess 
-               # while we are ALREADY in that dir will cause it to look for terraform/dev/terraform/dev.
-               
-               # Fix: Since main() creates a context manager that changes directory, 
-               # we should pass "." as working_dir to get_resource_id_from_state
-               # OR remove os.chdir from main loop. 
-               
-               # Let's clean up: pass "." since we are already inside the dir
+               # We are currently IN the directory, so working_dir="." is correct.
+               # Unless 'terraform init' was run elsewhere?
+               # In GitHub Actions workflow: '- working-directory: terraform/dev' for init
+               # This script is passed '--terraform-dir terraform/dev'
+               # So this should correspond.
                res_id = get_resource_id_from_state(addr, ".")
             
             info = {
