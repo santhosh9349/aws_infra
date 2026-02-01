@@ -23,38 +23,32 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
     """Get resource ID from Terraform state."""
     logger.info(f"Looking up state for {address}...")
     
-    # NOTE: terraform state show does NOT support -json flag in versions < 1.7 (approx)
-    # The error "flag provided but not defined: -json" confirms this.
-    # We will use plain text format and regex to extract ID.
-    
-    # ISSUE: We are passing 'working_dir' via cwd argument.
-    # The error "Error: No state file was found!" persisted even with cwd="."
-    # This implies that '.' is NOT the correct directory.
-    # But main() does os.chdir(args.terraform_dir) before calling this!
-    
-    # DEBUG: Check where we are!
-    # current_dir = os.getcwd() # But this runs in python, not subprocess.
-    
-    # Let's verify files in working_dir
-    # Listing files in the director might overload logs, but helpful if failing.
-    
     cmd = ["terraform", "state", "show", "-no-color", address]
     
     try:
-        # DO NOT use cwd argument if we already chdir'd in main()
-        # If we run with cwd=working_dir, and working_dir=".", it should be fine.
-        # But if working_dir is absolute path, it works.
-        # If working_dir is relative path "terraform/dev" AND we already chdir'd to "terraform/dev",
-        # then cwd="terraform/dev" means "terraform/dev/terraform/dev" -> Fail.
+        # Debug: ensure we are where we think we are
+        # logger.info(f"CWD: {os.getcwd()}")
         
-        # FIX: We changed the call in main() to pass "." as working_dir.
-        # But let's actally TRUST the os.chdir from main() and NOT set cwd here,
-        # OR set cwd to None to use current process directory.
+        # WE TRUST os.chdir() from main. cwd=None uses current process directory.
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=None)
         
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=None)
+        if result.returncode != 0:
+            # Handle standard Terraform errors gracefully
+            if "No state file was found" in result.stderr:
+                logger.warning(f"State lookup failed: No state file found in {os.getcwd()}")
+                # Optional: debug listdir
+                # logger.info(f"Dir contents: {os.listdir('.')}")
+                return None
+            elif "Resource instance not found" in result.stderr:
+                logger.info(f"Resource {address} not found in state (New resource).")
+                return None
+            else:
+                logger.warning(f"Command failed: {' '.join(cmd)}\nError: {result.stderr.strip()}")
+                return None
+                
         output = result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Command failed: {' '.join(cmd)}\nError: {e.stderr}")
+    except Exception as e:
+        logger.warning(f"Execution failed: {e}")
         return None
     
     if output:
@@ -182,13 +176,12 @@ def main():
             
             # Fallback to state lookup (unlikely to work for drift, but good for updates)
             if not res_id:
-               # If action is creation, it's missing from state
-               if "created" in action:
-                   logger.info(f"Skipping state lookup for {addr} (Action: {action}) - Resource not in state")
-                   res_id = None
-               else:
-                   # We are currently IN the directory, so working_dir="." is correct.
-                   res_id = get_resource_id_from_state(addr, ".")
+               # If action is creation, it MIGHT be a deleted resource (Drift) -> ID is in state.
+               # Or it MIGHT be a new resource -> ID is not in state.
+               # We must try to look it up.
+               
+               # We are currently IN the directory, so working_dir="." is correct.
+               res_id = get_resource_id_from_state(addr, ".")
             
             info = {
                 "address": addr,
