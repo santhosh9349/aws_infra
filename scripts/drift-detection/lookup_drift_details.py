@@ -27,8 +27,20 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
     # The error "flag provided but not defined: -json" confirms this.
     # We will use plain text format and regex to extract ID.
     
+    # IMPORTANT: We are using Terraform Cloud (remote backend).
+    # 'terraform state show' usually requires init. 
+    # The caller script changes directory to working_dir but subprocess might not inherit it if we don't specify explicit cwd.
+    
     cmd = ["terraform", "state", "show", "-no-color", address]
-    output = run_command(cmd) # Executing inside the terraform dir
+    
+    # Pass cwd=working_dir to subprocess to ensuring we run inside the terraform module folder
+    # where .terraform folder exists (from 'terraform init').
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=working_dir)
+        output = result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Command failed: {' '.join(cmd)}\nError: {e.stderr}")
+        return None
     
     if output:
         # Look for "id = ..." line
@@ -149,7 +161,18 @@ def main():
             
             # Fallback to state lookup (unlikely to work for drift, but good for updates)
             if not res_id:
-               res_id = get_resource_id_from_state(addr, args.terraform_dir)
+               # Ensure we pass the absolute path to working_dir if possible, or assume it's relative
+               # In main() we chdir'd but get_resource_id_from_state now takes working_dir arg and uses it as cwd
+               # but wait, if we already os.chdir(args.terraform_dir) in main loop,
+               # then passing args.terraform_dir (which might be relative like 'terraform/dev') to cwd=... in subprocess 
+               # while we are ALREADY in that dir will cause it to look for terraform/dev/terraform/dev.
+               
+               # Fix: Since main() creates a context manager that changes directory, 
+               # we should pass "." as working_dir to get_resource_id_from_state
+               # OR remove os.chdir from main loop. 
+               
+               # Let's clean up: pass "." since we are already inside the dir
+               res_id = get_resource_id_from_state(addr, ".")
             
             info = {
                 "address": addr,
