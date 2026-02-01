@@ -9,7 +9,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from .models import NotificationConfig
+from models import NotificationConfig
 
 
 def load_config(env_file: Optional[str] = None) -> NotificationConfig:

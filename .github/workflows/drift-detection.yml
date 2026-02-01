@@ -177,12 +177,11 @@ jobs:
         id: cloudtrail
         if: steps.plan.outputs.drift_detected == 'true'
         run: |
-          if [ -f scripts/drift-detection/query-cloudtrail.sh ]; then
-            chmod +x scripts/drift-detection/query-cloudtrail.sh
-            scripts/drift-detection/query-cloudtrail.sh || true
-          else
-            echo "CloudTrail query script not found, skipping attribution"
-          fi
+          echo "Running attribution analysis..."
+          python scripts/drift-detection/lookup_drift_details.py \
+            --plan-file ${{ github.workspace }}/plan_output.txt \
+            --terraform-dir terraform/${{ github.event.inputs.environment || 'dev' }} \
+            > /tmp/attribution_table.md || echo "Attribution failed" > /tmp/attribution_table.md
 
       - name: Generate issue body
         id: issue_body
@@ -201,6 +200,13 @@ jobs:
           
           # Get plan text output (truncated)
           PLAN_OUTPUT=$(head -200 ${{ github.workspace }}/plan_output.txt)
+          
+          # Read attribution table
+          if [ -f /tmp/attribution_table.md ]; then
+            ATTRIBUTION_SECTION=$(cat /tmp/attribution_table.md)
+          else
+            ATTRIBUTION_SECTION="No attribution data available."
+          fi
           
           # Create issue body
           cat > /tmp/issue_body.md << EOF
@@ -223,6 +229,10 @@ jobs:
           | 🗑️ Deletes | ${DELETE_COUNT} |
           | 🔄 Replaces | ${REPLACE_COUNT} |
           | **Total** | **${TOTAL_COUNT}** |
+
+          ---
+
+          ${ATTRIBUTION_SECTION}
 
           ---
 
