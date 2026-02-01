@@ -9,7 +9,7 @@ import re
 from typing import List, Tuple
 from datetime import datetime
 
-from .models import DriftDetectionEvent, ResourceChange, NotificationPart
+from models import DriftDetectionEvent, ResourceChange, NotificationPart
 
 
 # Maximum message length for Telegram
