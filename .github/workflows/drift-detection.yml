@@ -48,6 +48,20 @@ jobs:
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
           terraform_wrapper: false
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          cd scripts/drift-detection
+          if [ -f requirements.txt ]; then
+             pip install -r requirements.txt
+          else
+             echo "requirements.txt not found, skipping dependency installation"
+          fi
+
       - name: Terraform Init
         id: init
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
@@ -262,31 +276,21 @@ jobs:
           echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
           echo "✅ Created issue: $ISSUE_URL"
 
-      - name: Send Teams notification
-        if: steps.plan.outputs.drift_detected == 'true' && steps.create_issue.outputs.issue_url != ''
+      - name: Send Telegram Notification
+        if: steps.plan.outputs.drift_detected == 'true'
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          ISSUE_URL: ${{ steps.create_issue.outputs.issue_url }}
-          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: |
-          chmod +x scripts/drift-detection/format-teams-card.sh
-          
-          # Generate Teams card JSON
-          TEAMS_PAYLOAD=$(scripts/drift-detection/format-teams-card.sh)
-          
-          # Send to Teams
-          RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/teams_response.txt \
-            -H "Content-Type: application/json" \
-            -d "$TEAMS_PAYLOAD" \
-            "$TEAMS_WEBHOOK_URL")
-          
-          if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "202" ]; then
-            echo "✅ Teams notification sent successfully"
+          cd scripts/drift-detection
+          # Check if the script exists
+          if [ -f notify_telegram.py ]; then
+            python notify_telegram.py \
+              --report ${{ github.workspace }}/plan_output.txt \
+              --environment ${{ github.event.inputs.environment || 'dev' }} \
+              --run-id ${{ github.run_id }}
           else
-            echo "⚠️ Teams notification failed with status $RESPONSE"
-            cat /tmp/teams_response.txt
-            # Don't fail the workflow for notification failures
+             echo "notify_telegram.py not found, skipping notification"
           fi
 
       - name: Workflow Summary
