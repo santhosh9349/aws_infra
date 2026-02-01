@@ -45,7 +45,8 @@ aws_infra/
 │   │   │   ├── main.tf         # EC2 instance definitions
 │   │   │   ├── outputs.tf      # EC2 outputs (instance_ids, IPs, etc.)
 │   │   │   └── variables.tf    # EC2 input variables
-│   │   └── tgw/                # Transit Gateway module for multi-VPC connectivity
+│   │   └── tgw/                # Transit Gateway module for multi-VPC connectivityn
+
 │   │       ├── main.tf         # TGW + multiple VPC attachments (scalable)
 │   │       ├── outputs.tf      # TGW outputs (tgw_id, attachment_ids, etc.)
 │   │       └── variables.tf    # TGW input variables

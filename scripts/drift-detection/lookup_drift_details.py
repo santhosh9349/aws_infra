@@ -27,25 +27,31 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
     # The error "flag provided but not defined: -json" confirms this.
     # We will use plain text format and regex to extract ID.
     
-    # IMPORTANT: We are using Terraform Cloud (remote backend).
-    # 'terraform state show' usually requires init. 
-    # The caller script changes directory to working_dir but subprocess might not inherit it if we don't specify explicit cwd.
+    # ISSUE: We are passing 'working_dir' via cwd argument.
+    # The error "Error: No state file was found!" persisted even with cwd="."
+    # This implies that '.' is NOT the correct directory.
+    # But main() does os.chdir(args.terraform_dir) before calling this!
+    
+    # DEBUG: Check where we are!
+    # current_dir = os.getcwd() # But this runs in python, not subprocess.
+    
+    # Let's verify files in working_dir
+    # Listing files in the director might overload logs, but helpful if failing.
     
     cmd = ["terraform", "state", "show", "-no-color", address]
     
-    # Pass cwd=working_dir to subprocess to ensuring we run inside the terraform module folder
-    # where .terraform folder exists (from 'terraform init').
     try:
-        # Use simple Popen or run? subprocess.run is fine.
-        # Ensure we are using absolute path for safety if provided?
-        # Actually, if we are inside the dir, we can just omit cwd or pass "."
-        # But let's verify if 'working_dir' is actually correct.
+        # DO NOT use cwd argument if we already chdir'd in main()
+        # If we run with cwd=working_dir, and working_dir=".", it should be fine.
+        # But if working_dir is absolute path, it works.
+        # If working_dir is relative path "terraform/dev" AND we already chdir'd to "terraform/dev",
+        # then cwd="terraform/dev" means "terraform/dev/terraform/dev" -> Fail.
         
-        # NOTE: When using remote state (Terraform Cloud), 'terraform init' creates a .terraform/terraform.tfstate
-        # which contains the connection info.
+        # FIX: We changed the call in main() to pass "." as working_dir.
+        # But let's actally TRUST the os.chdir from main() and NOT set cwd here,
+        # OR set cwd to None to use current process directory.
         
-        # If shell=True, arguments must be a string. We used list which is safe.
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=working_dir)
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=None)
         output = result.stdout.strip()
     except subprocess.CalledProcessError as e:
         logger.warning(f"Command failed: {' '.join(cmd)}\nError: {e.stderr}")
@@ -121,19 +127,20 @@ def main():
 
     # 1. Parse Plan File for Addresses and Refresh IDs
     addresses = []
+    drift_data = {} # Map address -> action
     refresh_ids = {} # Map address -> ID
     
     try:
         with open(args.plan_file, "r") as f:
             content = f.read()
             
-            # Find addresses that will be created (drift)
-            # Pattern: ^  # ([\w\.-]+) will be (created|must be replaced)
-            matches = re.findall(r'^\s\s#\s([\w\.-]+)\s(?:will be|must be)', content, re.MULTILINE)
-            addresses = list(set(matches)) # Unique
+            # Find addresses and actions
+            # Regex captures: Group 1=Address, Group 2=Action phrase
+            matches = re.findall(r'^\s\s#\s([\w\.-]+)\s((?:will be|must be)\s[\w-]+)', content, re.MULTILINE)
+            for addr, action in matches:
+                drift_data[addr] = action
             
             # Extract IDs from "Refreshing state..." lines
-            # Example: module.x.y: Refreshing state... [id=i-123]
             refresh_matches = re.findall(r'^([\w\.-]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
             for addr, rid in refresh_matches:
                 refresh_ids[addr] = rid
@@ -142,10 +149,9 @@ def main():
         logger.error(f"Error reading plan file: {e}")
         sys.exit(1)
 
-    logger.info(f"Found {len(addresses)} drifted resources to investigate.")
+    logger.info(f"Found {len(drift_data)} drifted resources to investigate.")
     
     results = []
-    
     import os
     
     # Priority list for display
@@ -161,7 +167,7 @@ def main():
     try:
         os.chdir(args.terraform_dir)
         
-        for addr in addresses:
+        for addr, action in drift_data.items():
             # Skip data sources
             if addr.startswith("data.") or ".data." in addr:
                 continue
@@ -176,19 +182,20 @@ def main():
             
             # Fallback to state lookup (unlikely to work for drift, but good for updates)
             if not res_id:
-               # We are currently IN the directory, so working_dir="." is correct.
-               # Unless 'terraform init' was run elsewhere?
-               # In GitHub Actions workflow: '- working-directory: terraform/dev' for init
-               # This script is passed '--terraform-dir terraform/dev'
-               # So this should correspond.
-               res_id = get_resource_id_from_state(addr, ".")
+               # If action is creation, it's missing from state
+               if "created" in action:
+                   logger.info(f"Skipping state lookup for {addr} (Action: {action}) - Resource not in state")
+                   res_id = None
+               else:
+                   # We are currently IN the directory, so working_dir="." is correct.
+                   res_id = get_resource_id_from_state(addr, ".")
             
             info = {
                 "address": addr,
                 "id": res_id or "Unknown",
                 "user": "-",
                 "time": "-",
-                "action": "-",
+                "action": action,
                 "priority": is_priority
             }
             
