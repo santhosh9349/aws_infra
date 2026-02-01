@@ -95,20 +95,25 @@ def main():
     parser.add_argument("--terraform-dir", required=True, help="Terraform working directory")
     args = parser.parse_args()
 
-    # 1. Parse Plan File for Addresses
+    # 1. Parse Plan File for Addresses and Refresh IDs
     addresses = []
+    refresh_ids = {} # Map address -> ID
+    
     try:
         with open(args.plan_file, "r") as f:
             content = f.read()
-            # Regex to find: # module.x.y will be created
-            # Matches: # <address> will be created
-            # Also: # <address> must be replaced
-            # Also: # <address> will be updated in-place
-            # We mostly care about "will be created" (deletion) or "replaced"
             
-            # Pattern: ^  # ([\w\.-]+) will be (created|updated in-place|destroyed|read)
+            # Find addresses that will be created (drift)
+            # Pattern: ^  # ([\w\.-]+) will be (created|must be replaced)
             matches = re.findall(r'^\s\s#\s([\w\.-]+)\s(?:will be|must be)', content, re.MULTILINE)
             addresses = list(set(matches)) # Unique
+            
+            # Extract IDs from "Refreshing state..." lines
+            # Example: module.x.y: Refreshing state... [id=i-123]
+            refresh_matches = re.findall(r'^([\w\.-]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
+            for addr, rid in refresh_matches:
+                refresh_ids[addr] = rid
+                
     except Exception as e:
         logger.error(f"Error reading plan file: {e}")
         sys.exit(1)
@@ -120,6 +125,9 @@ def main():
     import os
     original_cwd = os.getcwd()
     
+    # Priority list for display
+    PRIORITY_TYPES = ["aws_instance", "aws_s3_bucket", "aws_rds_cluster", "aws_db_instance", "aws_security_group"]
+    
     try:
         os.chdir(args.terraform_dir)
         
@@ -128,14 +136,25 @@ def main():
             if addr.startswith("data.") or ".data." in addr:
                 continue
                 
-            res_id = get_resource_id_from_state(addr, args.terraform_dir)
+            # Filter noise: Skip IAM, Attachments unless critical?
+            # User request: "just the deleted EC2 instance"
+            # We strictly prioritize EC2 or other major resources.
+            is_priority = any(pt in addr for pt in PRIORITY_TYPES)
+            
+            # Use ID from refresh logs if available (Reliable for drift)
+            res_id = refresh_ids.get(addr)
+            
+            # Fallback to state lookup (unlikely to work for drift, but good for updates)
+            if not res_id:
+               res_id = get_resource_id_from_state(addr, args.terraform_dir)
             
             info = {
                 "address": addr,
                 "id": res_id or "Unknown",
                 "user": "-",
                 "time": "-",
-                "action": "-"
+                "action": "-",
+                "priority": is_priority
             }
             
             if res_id:
@@ -146,13 +165,26 @@ def main():
             
     finally:
         os.chdir(original_cwd)
+        
+    # Sort: Priority first, then alphabetical
+    results.sort(key=lambda x: (not x['priority'], x['address']))
 
     # Output Markdown Table
     print("\n### Drift Attribution Analysis")
     print("| Resource | ID | Actor | Action | Time |")
     print("|----------|----|-------|--------|------|")
     for r in results:
-        print(f"| `{r['address']}` | `{r['id']}` | **{r['user']}** | {r['action']} | {r['time']} |")
+        # Only show priority items OR items where we found an actor
+        show_row = r['priority'] or r['user'] != "-"
+        
+        if show_row:
+            # Highlight priority
+            display_addr = f"**{r['address']}**" if r['priority'] else f"`{r['address']}`"
+            print(f"| {display_addr} | `{r['id']}` | **{r['user']}** | {r['action']} | {r['time']} |")
+            
+    if not results:
+        print("No drift attribution available.")
+    
     print("\n")
 
 if __name__ == "__main__":
