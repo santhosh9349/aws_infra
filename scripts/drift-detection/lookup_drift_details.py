@@ -162,6 +162,32 @@ def main():
     try:
         os.chdir(args.terraform_dir)
         
+        # For Terraform Cloud remote state, we need to ensure backend is initialized
+        # in this process context. Run terraform init to establish connection.
+        logger.info("Initializing Terraform backend for state access...")
+        init_result = subprocess.run(
+            ["terraform", "init", "-backend=true", "-input=false", "-no-color"],
+            capture_output=True, text=True
+        )
+        if init_result.returncode != 0:
+            logger.warning(f"Terraform init failed: {init_result.stderr}")
+        else:
+            logger.info("Terraform backend initialized successfully")
+        
+        # Verify state is accessible by listing resources
+        list_result = subprocess.run(
+            ["terraform", "state", "list", "-no-color"],
+            capture_output=True, text=True
+        )
+        if list_result.returncode == 0:
+            state_resources = list_result.stdout.strip().split('\n') if list_result.stdout.strip() else []
+            logger.info(f"State contains {len(state_resources)} resources")
+            # Build a set for quick lookup
+            state_resource_set = set(state_resources)
+        else:
+            logger.warning(f"Could not list state: {list_result.stderr}")
+            state_resource_set = set()
+        
         for addr, action in drift_data.items():
             # Skip data sources
             if addr.startswith("data.") or ".data." in addr:
@@ -175,14 +201,12 @@ def main():
             # Use ID from refresh logs if available (Reliable for drift)
             res_id = refresh_ids.get(addr)
             
-            # Fallback to state lookup (unlikely to work for drift, but good for updates)
-            if not res_id:
-               # If action is creation, it MIGHT be a deleted resource (Drift) -> ID is in state.
-               # Or it MIGHT be a new resource -> ID is not in state.
-               # We must try to look it up.
-               
+            # Fallback to state lookup - only if resource exists in state
+            if not res_id and addr in state_resource_set:
                # We are currently IN the directory, so working_dir="." is correct.
                res_id = get_resource_id_from_state(addr, ".")
+            elif not res_id:
+               logger.info(f"Resource {addr} not in state (Action: {action})")
             
             info = {
                 "address": addr,
