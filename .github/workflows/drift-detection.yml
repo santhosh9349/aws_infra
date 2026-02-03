@@ -160,12 +160,12 @@ jobs:
           fi
 
           # Parse plain text plan output to find changed resources
-          # Look for lines starting with "# <address> <action>"
+          # Look for lines starting with "# <address> <action>" checking for indentation
           # Actions: will be created, will be updated in-place, must be replaced, will be destroyed
           
           # Extract addresses using grep and cleaning
-          # Pattern matches: # [resource.address] [action]
-          grep -E "^# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" | awk '{print $2}' | sed 's/"//g' > /tmp/changed_addresses.txt
+          # Pattern matches: optional indentation, #, space, resource.address, space, action
+          grep -E "^[[:space:]]*# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" | awk '{print $2}' | sed 's/"//g' > /tmp/changed_addresses.txt
           
           echo "Found changed addresses:"
           cat /tmp/changed_addresses.txt
