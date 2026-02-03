@@ -121,69 +121,88 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
-      - name: Parse drift from plan output
-        id: parse
-        if: steps.plan.outputs.drift_detected == 'true'
-        run: |
-          # Parse the plan text output to identify changed resources
-          echo "Parsing drift from plan output..."
-          
-          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
-          DRIFT_FILE="/tmp/drift_resources.txt"
-          
-          # Extract resource changes from plan output
-          # Look for lines starting with "  # " and containing action keywords
-          grep -E "^  # .* (will be|must be)" "$PLAN_FILE" > "$DRIFT_FILE" || touch "$DRIFT_FILE"
-          
-          # Function to safe count matches
-          count_matches() {
-            grep -c "$1" "$DRIFT_FILE" || echo "0"
-          }
-          
-          # Get raw counts
-          raw_create=$(count_matches "will be created")
-          raw_update=$(count_matches "will be updated")
-          raw_delete=$(count_matches "will be destroyed")
-          raw_replace=$(count_matches "must be replaced")
-          
-          # Sanitize (remove whitespace)
-          CREATE_COUNT=$(echo "$raw_create" | tr -d '[:space:]')
-          UPDATE_COUNT=$(echo "$raw_update" | tr -d '[:space:]')
-          DELETE_COUNT=$(echo "$raw_delete" | tr -d '[:space:]')
-          REPLACE_COUNT=$(echo "$raw_replace" | tr -d '[:space:]')
-          
-          # Ensure defaults (strip leading zeros to avoid octal interpretation, but keep single 0)
-          # actually bash handles 09 as octal, so 10-base force is tricky in $(( )).
-          # simple way: assume grep -c returns straight decimal.
-          
-          [ -z "$CREATE_COUNT" ] && CREATE_COUNT=0
-          [ -z "$UPDATE_COUNT" ] && UPDATE_COUNT=0
-          [ -z "$DELETE_COUNT" ] && DELETE_COUNT=0
-          [ -z "$REPLACE_COUNT" ] && REPLACE_COUNT=0
-          
-          # Calculate total using let or expr to avoid syntax errors with edge cases
-          TOTAL_COUNT=$(( 10#$CREATE_COUNT + 10#$UPDATE_COUNT + 10#$DELETE_COUNT + 10#$REPLACE_COUNT ))
-          
-          # Output to GitHub Action
-          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
-          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
-          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
-          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
-          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
-          
-          echo "📊 Drift summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replaces"
+      - name: Terraform Show JSON
+        if: steps.plan.outputs.exit_code == '2'
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: terraform show -json tfplan > ${{ github.workspace }}/plan.json
 
-      - name: Query CloudTrail for attribution
-        id: cloudtrail
-        if: steps.plan.outputs.drift_detected == 'true'
-        env:
-          TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
+      - name: Extract Resource IDs
+        id: extract_ids
+        if: steps.plan.outputs.exit_code == '2'
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          echo "Running attribution analysis..."
-          python scripts/drift-detection/lookup_drift_details.py \
-            --plan-file ${{ github.workspace }}/plan_output.txt \
-            --terraform-dir terraform/${{ github.event.inputs.environment || 'dev' }} \
-            > /tmp/attribution_table.md || echo "Attribution failed" > /tmp/attribution_table.md
+          echo "Extracting resource IDs for attribution..."
+          PLAN_JSON="${{ github.workspace }}/plan.json"
+          ID_FILE="/tmp/resource_ids.txt"
+          > $ID_FILE
+
+          # Parse JSON to find changed resources
+          # Filter for non-noop changes
+          changes=$(jq -c '.resource_changes[] | select(.change.actions != ["no-op"])' $PLAN_JSON)
+          
+          IFS=$'\n'
+          for change in $changes; do
+            address=$(echo "$change" | jq -r '.address')
+            
+            # 1. Try to get ID from 'before' state in plan (for updates/deletes)
+            id=$(echo "$change" | jq -r '.change.before.id // .change.before.arn // empty')
+            
+            # 2. If ID is missing (e.g. forced 'create' due to manual delete), fetch from remote state
+            if [ -z "$id" ]; then
+               echo "Looking up missing ID for $address from remote state..."
+               # Use 'terraform state show' which works with remote backend
+               id=$(terraform state show -no-color "$address" 2>/dev/null | grep -E "^    id\s+=" | awk -F'=' '{print $2}' | tr -d ' "') || true
+            fi
+            
+            if [ -n "$id" ]; then
+               echo "$address|$id" >> $ID_FILE
+               echo "Found ID for $address: $id"
+            else
+               echo "Could not find ID for $address"
+            fi
+          done
+
+      - name: Query CloudTrail for Attribution
+        id: cloudtrail
+        if: steps.plan.outputs.exit_code == '2'
+        run: |
+          echo "Querying CloudTrail..."
+          IDS_FILE="/tmp/resource_ids.txt"
+          ATTRIBUTION_FILE="/tmp/attribution_table.md"
+          > $ATTRIBUTION_FILE
+          
+          if [ ! -f $IDS_FILE ]; then
+            echo "No IDs found."
+            exit 0
+          fi
+          
+          # Header for the table (optional, depending on your issue template)
+          # echo "| Resource | Action | User | Time |" >> $ATTRIBUTION_FILE
+          # echo "|---|---|---|---|" >> $ATTRIBUTION_FILE
+
+          while IFS='|' read -r address resource_id; do
+             echo "Checking CloudTrail for $resource_id ($address)..."
+             
+             # Lookup event (limit 1, look back 7 days implicitly by default or add --start-time if needed)
+             event=$(aws cloudtrail lookup-events \
+               --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
+               --max-results 1 \
+               --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null)
+             
+             if [ -n "$event" ] && [ "$event" != "None" ]; then
+                user=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.userName // "unknown"')
+                time=$(echo "$event" | jq -r '.eventTime')
+                eventName=$(echo "$event" | jq -r '.eventName')
+                
+                # Format row for GitHub Issue
+                echo "| \`$address\` | $eventName | \`$user\` | $time |" >> $ATTRIBUTION_FILE
+             else
+                echo "| \`$address\` | Unknown | *(unavailable)* | - |" >> $ATTRIBUTION_FILE
+             fi
+          done < $IDS_FILE
+          
+          echo "Attribution analysis complete."
+          cat $ATTRIBUTION_FILE
 
       - name: Generate issue body
         id: issue_body
