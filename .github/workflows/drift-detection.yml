@@ -121,75 +121,87 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
-      - name: Terraform Show JSON
-        if: steps.plan.outputs.exit_code == '2'
-        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
-        run: terraform show -json tfplan > ${{ github.workspace }}/plan.json
-
       - name: Extract Resource IDs
         id: extract_ids
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
           echo "Extracting resource IDs for attribution..."
-          PLAN_JSON="${{ github.workspace }}/plan.json"
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ID_FILE="/tmp/resource_ids.txt"
           > $ID_FILE
 
-          # Parse JSON to find changed resources
-          # Filter for non-noop changes
-          changes=$(jq -c '.resource_changes[] | select(.change.actions != ["no-op"])' $PLAN_JSON)
+          if [ ! -f "$PLAN_FILE" ]; then
+            echo "Error: Plan output file not found at $PLAN_FILE"
+            exit 1
+          fi
+
+          # Parse plain text plan output to find changed resources
+          # Look for lines starting with "# <address> <action>"
+          # Actions: will be created, will be updated in-place, must be replaced, will be destroyed
           
-          IFS=$'\n'
-          for change in $changes; do
-            address=$(echo "$change" | jq -r '.address')
-            
-            # 1. Try to get ID from 'before' state in plan (for updates/deletes)
-            id=$(echo "$change" | jq -r '.change.before.id // .change.before.arn // empty')
-            
-            # 2. If ID is missing (e.g. forced 'create' due to manual delete), fetch from remote state
-            if [ -z "$id" ]; then
-               echo "Looking up missing ID for $address from remote state..."
-               # Use 'terraform state show' which works with remote backend
-               id=$(terraform state show -no-color "$address" 2>/dev/null | grep -E "^    id\s+=" | awk -F'=' '{print $2}' | tr -d ' "') || true
-            fi
+          # Extract addresses using grep and cleaning
+          # Pattern matches: # [resource.address] [action]
+          grep -E "^# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" | awk '{print $2}' | sed 's/"//g' > /tmp/changed_addresses.txt
+          
+          echo "Found changed addresses:"
+          cat /tmp/changed_addresses.txt
+          
+          while read -r address; do
+             if [ -z "$address" ]; then continue; fi
+             
+             echo "Processing $address..."
+             
+             # Fetch ID from remote state
+             # Since 'terraform plan' does not update state, the remote state still contains 
+             # the details of the resources that drifted (even if they were manually deleted).
+             id=$(terraform state show -no-color "$address" 2>/dev/null | grep -E "^    (id|arn)\s+=" | head -n 1 | awk -F'=' '{print $2}' | tr -d ' "') || true
             
             if [ -n "$id" ]; then
                echo "$address|$id" >> $ID_FILE
                echo "Found ID for $address: $id"
             else
-               echo "Could not find ID for $address"
+               echo "Could not find ID for $address (Resource might be new in code but not in state)"
             fi
-          done
+          done < /tmp/changed_addresses.txt
 
       - name: Query CloudTrail for Attribution
         id: cloudtrail
         if: steps.plan.outputs.exit_code == '2'
         run: |
-          echo "Querying CloudTrail..."
+          echo "Querying CloudTrail for drifted resources..."
           IDS_FILE="/tmp/resource_ids.txt"
           ATTRIBUTION_FILE="/tmp/attribution_table.md"
           > $ATTRIBUTION_FILE
           
-          if [ ! -f $IDS_FILE ]; then
-            echo "No IDs found."
+          if [ ! -f $IDS_FILE ] || [ ! -s $IDS_FILE ]; then
+            echo "No resource IDs found to query."
+            echo "No attribution data available." > $ATTRIBUTION_FILE
             exit 0
           fi
           
-          # Header for the table (optional, depending on your issue template)
-          # echo "| Resource | Action | User | Time |" >> $ATTRIBUTION_FILE
-          # echo "|---|---|---|---|" >> $ATTRIBUTION_FILE
+          # Add table header
+          echo "### Drift Attribution Analysis" >> $ATTRIBUTION_FILE
+          echo "" >> $ATTRIBUTION_FILE
+          echo "| Resource | Action | Actor | Event Time |" >> $ATTRIBUTION_FILE
+          echo "|---|---|---|---|" >> $ATTRIBUTION_FILE
 
           while IFS='|' read -r address resource_id; do
+             if [ -z "$resource_id" ] || [ "$resource_id" == "null" ]; then
+                echo "| \`$address\` | Unknown | *(ID missing)* | - |" >> $ATTRIBUTION_FILE
+                continue
+             fi
+
              echo "Checking CloudTrail for $resource_id ($address)..."
              
-             # Lookup event (limit 1, look back 7 days implicitly by default or add --start-time if needed)
+             # Lookup event (limit 1, look back 7 days implicitly by default)
              event=$(aws cloudtrail lookup-events \
                --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
                --max-results 1 \
                --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null)
              
              if [ -n "$event" ] && [ "$event" != "None" ]; then
+                # Parse JSON string from CloudTrail
                 user=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.userName // "unknown"')
                 time=$(echo "$event" | jq -r '.eventTime')
                 eventName=$(echo "$event" | jq -r '.eventName')
@@ -197,7 +209,7 @@ jobs:
                 # Format row for GitHub Issue
                 echo "| \`$address\` | $eventName | \`$user\` | $time |" >> $ATTRIBUTION_FILE
              else
-                echo "| \`$address\` | Unknown | *(unavailable)* | - |" >> $ATTRIBUTION_FILE
+                echo "| \`$address\` | Unknown | *(No CloudTrail event found)* | - |" >> $ATTRIBUTION_FILE
              fi
           done < $IDS_FILE
           
