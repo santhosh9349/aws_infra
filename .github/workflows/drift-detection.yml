@@ -121,6 +121,29 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
+      - name: Parse Terraform Plan
+        id: parse
+        if: steps.plan.outputs.exit_code == '2'
+        run: |
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
+          
+          # Count occurrences of actions in the plan output
+          # Note: These patterns match standard Terraform plan output structure
+          create_count=$(grep -c " will be created" "$PLAN_FILE" || true)
+          update_count=$(grep -c " will be updated in-place" "$PLAN_FILE" || true)
+          delete_count=$(grep -c " will be destroyed" "$PLAN_FILE" || true)
+          replace_count=$(grep -c " must be replaced" "$PLAN_FILE" || true)
+          
+          total_count=$((create_count + update_count + delete_count + replace_count))
+          
+          echo "create_count=$create_count" >> $GITHUB_OUTPUT
+          echo "update_count=$update_count" >> $GITHUB_OUTPUT
+          echo "delete_count=$delete_count" >> $GITHUB_OUTPUT
+          echo "replace_count=$replace_count" >> $GITHUB_OUTPUT
+          echo "total_count=$total_count" >> $GITHUB_OUTPUT
+          
+          echo "Plan Summary: $create_count creates, $update_count updates, $delete_count deletes, $replace_count replacements."
+
       - name: Extract Resource IDs
         id: extract_ids
         if: steps.plan.outputs.exit_code == '2'
