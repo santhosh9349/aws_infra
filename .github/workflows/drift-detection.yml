@@ -150,81 +150,96 @@ jobs:
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
           echo "=== Step 1: Extracting resource IDs for CloudTrail attribution ==="
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ID_FILE="/tmp/resource_ids.txt"
           > "$ID_FILE"
 
-          # --- Method 1: Try JSON plan output (most reliable) ---
-          echo "Attempting terraform show -json..."
-          if terraform show -json 2>/dev/null | jq -e '.values' > /dev/null 2>&1; then
-            echo "Using JSON state output to extract IDs..."
+          # --- Debug: Show plan lines that contain "will be" to understand format ---
+          echo "--- DEBUG: Lines containing 'will be' in plan output ---"
+          grep -n "will be" "$PLAN_FILE" | head -30 || echo "(no matches)"
+          echo "--- END DEBUG ---"
+
+          # --- Step 1a: Extract changed resource addresses from plan text ---
+          # TFC plan output indentation varies; match any line with # <address> <action>
+          # Use flexible pattern: optional whitespace, #, space, address, action
+          grep -oP '(?<=#\s)[a-zA-Z0-9_."\[\]-]+(?=\s+(will be|must be|has changed))' "$PLAN_FILE" \
+            | sed 's/"//g' | sort -u > /tmp/changed_addresses.txt || true
+
+          ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
+          echo "Found $ADDR_COUNT changed resource addresses:"
+          cat /tmp/changed_addresses.txt
+
+          if [ "$ADDR_COUNT" -eq 0 ]; then
+            echo "⚠️ No addresses extracted from plan. Trying alternative pattern..."
+            # Fallback: broader grep for any line with "will be created/destroyed/updated"
+            grep -E "(will be created|will be destroyed|will be updated|must be replaced)" "$PLAN_FILE" \
+              | grep '#' \
+              | sed 's/.*#\s*//' | awk '{print $1}' | sed 's/"//g' | sort -u > /tmp/changed_addresses.txt || true
             
-            # Get list of changed resource addresses from plan text
-            PLAN_FILE="${{ github.workspace }}/plan_output.txt"
-            grep -E "# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" \
-              | awk '{print $2}' > /tmp/changed_addresses.txt || true
-            
-            echo "Changed addresses found:"
+            ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
+            echo "Fallback found $ADDR_COUNT addresses:"
             cat /tmp/changed_addresses.txt
-            
-            # Extract current state as JSON (contains IDs of all existing resources)
-            terraform show -json 2>/dev/null > /tmp/state.json || true
-            
-            while read -r address; do
-              [ -z "$address" ] && continue
-              echo "Looking up ID for: $address"
-              
-              # Search in JSON state for this resource's ID
-              # The state JSON has .values.root_module.resources[] and .values.root_module.child_modules[].resources[]
-              id=$(jq -r --arg addr "$address" '
-                [.. | objects | select(.address? == $addr) | .values.id // .values.arn // empty] | first // empty
-              ' /tmp/state.json 2>/dev/null) || true
-              
-              if [ -n "$id" ] && [ "$id" != "null" ]; then
-                echo "$address|$id" >> "$ID_FILE"
-                echo "  ✅ Found ID: $id"
-              else
-                echo "  ⚠️ No ID found in JSON state, trying terraform state show..."
-                # --- Method 2: Fallback to terraform state show ---
-                id=$(terraform state show -no-color "$address" 2>/dev/null \
-                  | grep -E '^\s+(id|arn)\s+=' | head -1 \
-                  | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
-                
-                if [ -n "$id" ] && [ "$id" != "null" ]; then
-                  echo "$address|$id" >> "$ID_FILE"
-                  echo "  ✅ Found ID (fallback): $id"
-                else
-                  echo "  ❌ Could not resolve ID for $address"
-                fi
-              fi
-            done < /tmp/changed_addresses.txt
+          fi
+
+          if [ "$ADDR_COUNT" -eq 0 ]; then
+            echo "❌ Could not extract any resource addresses from plan output."
+            exit 0
+          fi
+
+          # --- Step 1b: Pull state from Terraform Cloud (most reliable method) ---
+          echo ""
+          echo "Pulling state from Terraform Cloud..."
+          if terraform state pull > /tmp/state_raw.json 2>/dev/null; then
+            STATE_SIZE=$(wc -c < /tmp/state_raw.json | tr -d ' ')
+            RESOURCE_COUNT=$(jq '.resources | length' /tmp/state_raw.json 2>/dev/null || echo "0")
+            echo "✅ State pulled successfully ($STATE_SIZE bytes, $RESOURCE_COUNT resources)"
           else
-            echo "JSON state unavailable, falling back to text parsing..."
+            echo "❌ Failed to pull state from Terraform Cloud"
+            exit 0
+          fi
+
+          # --- Step 1c: For each changed address, find its ID in the state ---
+          while read -r address; do
+            [ -z "$address" ] && continue
+            echo ""
+            echo "Looking up ID for: $address"
+
+            # Parse address into module, type, name for state JSON matching
+            # Address format: module.<mod>.type.name OR type.name
+            # State JSON format: .resources[] with .module, .type, .name fields
+            # Construct the expected module path and resource type.name
             
-            # --- Fallback: Parse from plan text + terraform state show ---
-            PLAN_FILE="${{ github.workspace }}/plan_output.txt"
-            grep -E "# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" \
-              | awk '{print $2}' > /tmp/changed_addresses.txt || true
-            
-            while read -r address; do
-              [ -z "$address" ] && continue
-              echo "Processing $address via terraform state show..."
-              
+            id=$(jq -r --arg addr "$address" '
+              # Build full address from state resource entry
+              .resources[] |
+              (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
+              select($full_addr == $addr) |
+              .instances[0].attributes.id // .instances[0].attributes.arn // empty
+            ' /tmp/state_raw.json 2>/dev/null) || true
+
+            if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+              echo "$address|$id" >> "$ID_FILE"
+              echo "  ✅ Found ID: $id"
+            else
+              # Fallback: try terraform state show for this specific resource
+              echo "  ⚠️ Not found in state JSON, trying terraform state show..."
               id=$(terraform state show -no-color "$address" 2>/dev/null \
                 | grep -E '^\s+(id|arn)\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
-              
-              if [ -n "$id" ] && [ "$id" != "null" ]; then
+
+              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
                 echo "$address|$id" >> "$ID_FILE"
-                echo "  ✅ Found ID: $id"
+                echo "  ✅ Found ID (fallback): $id"
               else
                 echo "  ❌ Could not resolve ID for $address"
               fi
-            done < /tmp/changed_addresses.txt
-          fi
+            fi
+          done < /tmp/changed_addresses.txt
 
           echo ""
           echo "=== Resource ID extraction complete ==="
-          echo "IDs found: $(wc -l < "$ID_FILE")"
+          ID_COUNT=$(wc -l < "$ID_FILE" | tr -d ' ')
+          echo "IDs resolved: $ID_COUNT / $ADDR_COUNT"
           cat "$ID_FILE"
 
       - name: Query CloudTrail for Attribution
