@@ -165,7 +165,7 @@ jobs:
           
           # Extract addresses using grep and cleaning
           # Pattern matches: optional indentation, #, space, resource.address, space, action
-          grep -E "^[[:space:]]*# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" | awk '{print $2}' | sed 's/"//g' > /tmp/changed_addresses.txt
+          grep -E "# [a-zA-Z0-9_.\[\]\"-]+ (will be|must be|has changed)" "$PLAN_FILE" | awk '{print $2}' > /tmp/changed_addresses.txt
           
           echo "Found changed addresses:"
           cat /tmp/changed_addresses.txt
