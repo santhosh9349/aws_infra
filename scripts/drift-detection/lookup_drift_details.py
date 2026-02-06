@@ -130,13 +130,15 @@ def main():
             content = f.read()
             
             # Find addresses and actions
-            # Regex captures: Group 1=Address, Group 2=Action phrase
-            matches = re.findall(r'^\s\s#\s([\w\.-]+)\s((?:will be|must be)\s[\w-]+)', content, re.MULTILINE)
+            # Regex captures: Group 1=Address (including brackets/quotes for for_each modules),
+            # Group 2=Action phrase
+            matches = re.findall(r'^\s\s#\s([\w\.\-\"\[\]]+)\s((?:will be|must be|has)\s[\w-]+)', content, re.MULTILINE)
             for addr, action in matches:
                 drift_data[addr] = action
             
             # Extract IDs from "Refreshing state..." lines
-            refresh_matches = re.findall(r'^([\w\.-]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
+            # Address may contain brackets/quotes for for_each resources
+            refresh_matches = re.findall(r'^([\w\.\-\"\[\]]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
             for addr, rid in refresh_matches:
                 refresh_ids[addr] = rid
                 

@@ -186,7 +186,46 @@ jobs:
             exit 0
           fi
 
-          # --- Step 1b: Pull state from Terraform Cloud (most reliable method) ---
+          # --- Step 1b: Extract IDs from "Refreshing state..." lines in plan output ---
+          # These lines appear during the refresh phase and contain the actual resource IDs
+          # Format: module.vpc["dev"].aws_vpc.this: Refreshing state... [id=vpc-xxx]
+          echo ""
+          echo "Parsing plan output for 'Refreshing state' IDs..."
+          declare -A REFRESH_IDS
+          while IFS= read -r line; do
+            addr=$(echo "$line" | grep -oP '^[^:]+(?=: Refreshing state)')
+            rid=$(echo "$line" | grep -oP '(?<=\[id=)[^\]]+')
+            if [ -n "$addr" ] && [ -n "$rid" ]; then
+              REFRESH_IDS["$addr"]="$rid"
+              echo "  📋 Refresh ID: $addr → $rid"
+            fi
+          done < <(grep 'Refreshing state\.\.\. \[id=' "$PLAN_FILE" 2>/dev/null || true)
+          echo "Found ${#REFRESH_IDS[@]} IDs from refresh lines"
+
+          # --- Step 1c: Extract resource names from plan output for "will be created" ---
+          # For resources being created (previously deleted), extract the "name" attribute
+          # from the plan block as a fallback identifier for CloudTrail lookup
+          echo ""
+          echo "Extracting resource names from plan output for 'will be created' resources..."
+          declare -A RESOURCE_NAMES
+          current_addr=""
+          while IFS= read -r line; do
+            # Match resource header: # module.xxx.aws_yyy.zzz will be created
+            if echo "$line" | grep -qP '^\s+#\s.+\s(will be|must be|has changed)'; then
+              current_addr=$(echo "$line" | grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))')
+            fi
+            # Match name attribute: + name = "some-name"
+            if [ -n "$current_addr" ] && echo "$line" | grep -qP '^\s+\+\s+name\s+=\s+"[^"]+"'; then
+              rname=$(echo "$line" | grep -oP '(?<=name\s+=\s+")[^"]+')
+              if [ -n "$rname" ]; then
+                RESOURCE_NAMES["$current_addr"]="$rname"
+                current_addr=""
+              fi
+            fi
+          done < "$PLAN_FILE"
+          echo "Found ${#RESOURCE_NAMES[@]} resource names from plan attributes"
+
+          # --- Step 1d: Pull state from Terraform Cloud ---
           echo ""
           echo "Pulling state from Terraform Cloud..."
           if terraform state pull > /tmp/state_raw.json 2>/dev/null; then
@@ -194,8 +233,8 @@ jobs:
             RESOURCE_COUNT=$(jq '.resources | length' /tmp/state_raw.json 2>/dev/null || echo "0")
             echo "✅ State pulled successfully ($STATE_SIZE bytes, $RESOURCE_COUNT resources)"
           else
-            echo "❌ Failed to pull state from Terraform Cloud"
-            exit 0
+            echo "⚠️ Failed to pull state from Terraform Cloud (continuing with refresh IDs)"
+            echo '{"resources":[]}' > /tmp/state_raw.json
           fi
 
           # --- Debug: Show all addresses available in state ---
@@ -204,43 +243,81 @@ jobs:
           jq -r '.resources[] | (if .module then .module + "." else "" end) + .type + "." + .name' /tmp/state_raw.json 2>/dev/null | head -40
           echo "--- END DEBUG ---"
 
-          # --- Step 1c: For each changed address, find its ID in the state ---
+          # --- Step 1e: For each changed address, find its ID using all sources ---
           while read -r address; do
             [ -z "$address" ] && continue
             echo ""
             echo "Looking up ID for: $address"
 
-            # Match address against state. The state JSON has:
-            #   .module = "module.vpc[\"dev\"]"  (with escaped quotes in JSON)
-            #   .type = "aws_vpc"
-            #   .name = "this"
-            # Full address = module + "." + type + "." + name
-            # The plan address format is: module.vpc["dev"].aws_vpc.this (with actual quotes)
-            
-            id=$(jq -r --arg addr "$address" '
-              .resources[] |
-              (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
-              select($full_addr == $addr) |
-              .instances[0].attributes.id // .instances[0].attributes.arn // empty
-            ' /tmp/state_raw.json 2>/dev/null) || true
+            id=""
 
-            if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-              echo "$address|$id" >> "$ID_FILE"
-              echo "  ✅ Found ID: $id"
-            else
-              # Fallback: try terraform state show (pass address with quotes)
-              echo "  ⚠️ Not found in state JSON, trying terraform state show..."
-              # terraform state show needs the address exactly as terraform knows it
+            # Priority 1: Check refresh line IDs (most reliable - directly from plan output)
+            if [ -n "${REFRESH_IDS[$address]+x}" ]; then
+              id="${REFRESH_IDS[$address]}"
+              echo "  ✅ Found ID (from refresh line): $id"
+            fi
+
+            # Priority 2: State JSON lookup
+            if [ -z "$id" ] || [ "$id" = "null" ]; then
+              id=$(jq -r --arg addr "$address" '
+                .resources[] |
+                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
+                select($full_addr == $addr) |
+                .instances[0].attributes.id // .instances[0].attributes.arn // empty
+              ' /tmp/state_raw.json 2>/dev/null) || true
+              
+              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+                echo "  ✅ Found ID (from state JSON): $id"
+              else
+                id=""
+              fi
+            fi
+
+            # Priority 3: State JSON lookup handling for_each resources with index_key
+            if [ -z "$id" ]; then
+              id=$(jq -r --arg addr "$address" '
+                .resources[] |
+                . as $res |
+                .instances[] |
+                (
+                  (if $res.module then $res.module + "." else "" end) +
+                  $res.type + "." + $res.name +
+                  (if .index_key then "[\"" + (.index_key | tostring) + "\"]" else "" end)
+                ) as $full_addr |
+                select($full_addr == $addr) |
+                .attributes.id // .attributes.arn // empty
+              ' /tmp/state_raw.json 2>/dev/null) || true
+
+              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+                echo "  ✅ Found ID (from state JSON with index_key): $id"
+              else
+                id=""
+              fi
+            fi
+
+            # Priority 4: terraform state show fallback
+            if [ -z "$id" ]; then
               id=$(terraform state show -no-color "$address" 2>/dev/null \
                 | grep -E '^\s+(id|arn)\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
 
               if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                echo "$address|$id" >> "$ID_FILE"
-                echo "  ✅ Found ID (fallback): $id"
+                echo "  ✅ Found ID (from terraform state show): $id"
               else
-                echo "  ❌ Could not resolve ID for $address"
+                id=""
               fi
+            fi
+
+            # Priority 5: Use resource name from plan output as fallback identifier
+            if [ -z "$id" ] && [ -n "${RESOURCE_NAMES[$address]+x}" ]; then
+              id="${RESOURCE_NAMES[$address]}"
+              echo "  ℹ️ Using resource name as identifier: $id"
+            fi
+
+            if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+              echo "$address|$id" >> "$ID_FILE"
+            else
+              echo "  ❌ Could not resolve ID for $address"
             fi
           done < /tmp/changed_addresses.txt
 
@@ -256,18 +333,62 @@ jobs:
         run: |
           echo "=== Step 2: Querying CloudTrail for actor attribution ==="
           IDS_FILE="/tmp/resource_ids.txt"
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ATTRIBUTION_FILE="/tmp/attribution_table.md"
+          ADDRESSES_FILE="/tmp/changed_addresses.txt"
           > "$ATTRIBUTION_FILE"
-          
-          if [ ! -f "$IDS_FILE" ] || [ ! -s "$IDS_FILE" ]; then
-            echo "No resource IDs found to query."
-            echo "### Drift Attribution Analysis" > "$ATTRIBUTION_FILE"
-            echo "" >> "$ATTRIBUTION_FILE"
-            echo "> ⚠️ No resource IDs could be resolved for CloudTrail lookup." >> "$ATTRIBUTION_FILE"
-            echo "> Resources showing 'will be created' may have been manually deleted outside Terraform." >> "$ATTRIBUTION_FILE"
-            exit 0
-          fi
-          
+
+          # Helper function: extract actor info from a CloudTrail event JSON string
+          extract_actor() {
+            local event="$1"
+            user_type=$(echo "$event" | jq -r '.userIdentity.type // "Unknown"')
+            case "$user_type" in
+              IAMUser)
+                actor_name=$(echo "$event" | jq -r '.userIdentity.userName // "unknown"')
+                actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
+                ;;
+              AssumedRole)
+                actor_name=$(echo "$event" | jq -r '
+                  (.userIdentity.sessionContext.sessionIssuer.userName // "unknown") + 
+                  "/" + 
+                  (.userIdentity.arn | split("/") | last // "unknown")
+                ')
+                actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
+                ;;
+              Root)
+                actor_name="ROOT ACCOUNT"
+                actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
+                ;;
+              AWSService)
+                actor_name=$(echo "$event" | jq -r '"AWS Service: " + (.userIdentity.invokedBy // "unknown")')
+                actor_id=$(echo "$event" | jq -r '.userIdentity.invokedBy // "unknown"')
+                ;;
+              *)
+                actor_name=$(echo "$event" | jq -r '.userIdentity.userName // (.userIdentity.arn | split("/") | last) // "unknown"')
+                actor_id=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.principalId // "unknown"')
+                ;;
+            esac
+          }
+
+          # Map Terraform resource type to CloudTrail delete event name
+          get_delete_event_name() {
+            local tf_type="$1"
+            case "$tf_type" in
+              aws_vpc) echo "DeleteVpc" ;;
+              aws_subnet) echo "DeleteSubnet" ;;
+              aws_instance) echo "TerminateInstances" ;;
+              aws_security_group) echo "DeleteSecurityGroup" ;;
+              aws_iam_role) echo "DeleteRole" ;;
+              aws_iam_instance_profile) echo "DeleteInstanceProfile" ;;
+              aws_iam_role_policy_attachment) echo "DetachRolePolicy" ;;
+              aws_route_table) echo "DeleteRouteTable" ;;
+              aws_internet_gateway) echo "DeleteInternetGateway" ;;
+              aws_ec2_transit_gateway) echo "DeleteTransitGateway" ;;
+              aws_ec2_transit_gateway_vpc_attachment) echo "DeleteTransitGatewayVpcAttachment" ;;
+              *) echo "" ;;
+            esac
+          }
+
           # Add table header
           echo "### Drift Attribution Analysis" >> "$ATTRIBUTION_FILE"
           echo "" >> "$ATTRIBUTION_FILE"
@@ -276,76 +397,93 @@ jobs:
 
           FOUND_COUNT=0
           MISS_COUNT=0
+          START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
-          while IFS='|' read -r address resource_id; do
-             if [ -z "$resource_id" ] || [ "$resource_id" == "null" ]; then
-                echo "| \`$address\` | - | - | *(ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
-                MISS_COUNT=$((MISS_COUNT + 1))
-                continue
-             fi
+          # Process resources that have IDs resolved
+          if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
+            while IFS='|' read -r address resource_id; do
+               if [ -z "$resource_id" ] || [ "$resource_id" == "null" ]; then
+                  echo "| \`$address\` | - | - | *(ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
+                  MISS_COUNT=$((MISS_COUNT + 1))
+                  continue
+               fi
 
-             echo "Querying CloudTrail for: $resource_id ($address)..."
-             
-             # Query CloudTrail - look back 7 days
-             START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
-             
-             event=$(aws cloudtrail lookup-events \
-               --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
-               --start-time "$START_TIME" \
-               --max-results 1 \
-               --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-             
-             if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
-                # Extract user identity fields
-                user_type=$(echo "$event" | jq -r '.userIdentity.type // "Unknown"')
-                
-                # Determine actor name based on identity type
-                case "$user_type" in
-                  IAMUser)
-                    actor_name=$(echo "$event" | jq -r '.userIdentity.userName // "unknown"')
-                    actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
-                    ;;
-                  AssumedRole)
-                    # For assumed roles, extract the role session name and role name
-                    actor_name=$(echo "$event" | jq -r '
-                      (.userIdentity.sessionContext.sessionIssuer.userName // "unknown") + 
-                      "/" + 
-                      (.userIdentity.arn | split("/") | last // "unknown")
-                    ')
-                    actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
-                    ;;
-                  Root)
-                    actor_name="ROOT ACCOUNT"
-                    actor_id=$(echo "$event" | jq -r '.userIdentity.arn // "unknown"')
-                    ;;
-                  AWSService)
-                    actor_name=$(echo "$event" | jq -r '"AWS Service: " + (.userIdentity.invokedBy // "unknown")')
-                    actor_id=$(echo "$event" | jq -r '.userIdentity.invokedBy // "unknown"')
-                    ;;
-                  *)
-                    actor_name=$(echo "$event" | jq -r '.userIdentity.userName // (.userIdentity.arn | split("/") | last) // "unknown"')
-                    actor_id=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.principalId // "unknown"')
-                    ;;
-                esac
-                
-                time=$(echo "$event" | jq -r '.eventTime // "-"')
-                eventName=$(echo "$event" | jq -r '.eventName // "Unknown"')
-                sourceIp=$(echo "$event" | jq -r '.sourceIPAddress // "-"')
-                
-                echo "  ✅ Found: $actor_name ($eventName) from $sourceIp at $time"
-                
-                echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
-                FOUND_COUNT=$((FOUND_COUNT + 1))
-             else
-                echo "  ❌ No CloudTrail event found for $resource_id"
-                echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
+               echo "Querying CloudTrail for: $resource_id ($address)..."
+               
+               event=$(aws cloudtrail lookup-events \
+                 --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
+                 --start-time "$START_TIME" \
+                 --max-results 1 \
+                 --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+               
+               if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
+                  extract_actor "$event"
+                  time=$(echo "$event" | jq -r '.eventTime // "-"')
+                  eventName=$(echo "$event" | jq -r '.eventName // "Unknown"')
+                  sourceIp=$(echo "$event" | jq -r '.sourceIPAddress // "-"')
+                  
+                  echo "  ✅ Found: $actor_name ($eventName) from $sourceIp at $time"
+                  echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
+                  FOUND_COUNT=$((FOUND_COUNT + 1))
+               else
+                  echo "  ❌ No CloudTrail event found for $resource_id"
+                  echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
+                  MISS_COUNT=$((MISS_COUNT + 1))
+               fi
+               
+               sleep 0.5
+            done < "$IDS_FILE"
+          fi
+
+          # For resources with no IDs at all, try CloudTrail event name lookup
+          # This handles "will be created" drift where resources were deleted from AWS
+          if [ -f "$ADDRESSES_FILE" ]; then
+            # Build set of addresses that already have IDs
+            declare -A HAS_ID
+            if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
+              while IFS='|' read -r addr _; do
+                HAS_ID["$addr"]=1
+              done < "$IDS_FILE"
+            fi
+
+            while read -r address; do
+              [ -z "$address" ] && continue
+              [ -n "${HAS_ID[$address]+x}" ] && continue
+
+              # Extract resource type from address (e.g., module.xxx.aws_subnet.this → aws_subnet)
+              tf_type=$(echo "$address" | grep -oP 'aws_[a-z0-9_]+' | tail -1)
+              delete_event=$(get_delete_event_name "$tf_type")
+
+              if [ -n "$delete_event" ]; then
+                echo "Trying CloudTrail EventName lookup: $delete_event for $address..."
+                event=$(aws cloudtrail lookup-events \
+                  --lookup-attributes AttributeKey=EventName,AttributeValue="$delete_event" \
+                  --start-time "$START_TIME" \
+                  --max-results 1 \
+                  --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+
+                if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
+                  extract_actor "$event"
+                  time=$(echo "$event" | jq -r '.eventTime // "-"')
+                  eventName=$(echo "$event" | jq -r '.eventName // "Unknown"')
+
+                  echo "  ✅ Found (via event name): $actor_name ($eventName) at $time"
+                  echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
+                  FOUND_COUNT=$((FOUND_COUNT + 1))
+                else
+                  echo "  ❌ No $delete_event events found in CloudTrail"
+                  echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
+                  MISS_COUNT=$((MISS_COUNT + 1))
+                fi
+                sleep 0.5
+              else
+                echo "  ⚠️ No CloudTrail event mapping for resource type: $tf_type ($address)"
+                echo "| \`$address\` | - | - | *(No ID or event mapping)* | - |" >> "$ATTRIBUTION_FILE"
                 MISS_COUNT=$((MISS_COUNT + 1))
-             fi
-             
-             # Rate limiting: CloudTrail API allows 2 requests/sec
-             sleep 0.5
-          done < "$IDS_FILE"
-          
+              fi
+            done < "$ADDRESSES_FILE"
+          fi
+
           echo "" >> "$ATTRIBUTION_FILE"
           echo "> ℹ️ Attribution found for $FOUND_COUNT/$((FOUND_COUNT + MISS_COUNT)) resources. Events older than 90 days cannot be queried." >> "$ATTRIBUTION_FILE"
           
@@ -456,17 +594,84 @@ jobs:
           echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
           echo "✅ Created issue: $ISSUE_URL"
 
-      - name: Send Telegram Notification
+      - name: Generate Drift Report JSON
+        id: drift_report
         if: steps.plan.outputs.drift_detected == 'true'
         env:
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CREATE_COUNT: ${{ steps.parse.outputs.create_count }}
+          UPDATE_COUNT: ${{ steps.parse.outputs.update_count }}
+          DELETE_COUNT: ${{ steps.parse.outputs.delete_count }}
+          REPLACE_COUNT: ${{ steps.parse.outputs.replace_count }}
+        run: |
+          PLAN_FILE="${{ github.workspace }}/plan_output.txt"
+          REPORT_FILE="/tmp/drift_report.json"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Build resource_changes array from plan output
+          CHANGES="[]"
+          while IFS= read -r line; do
+            addr=$(echo "$line" | grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))')
+            [ -z "$addr" ] && continue
+            # Extract resource type from address (last aws_xxx segment)
+            rtype=$(echo "$addr" | grep -oP 'aws_[a-z0-9_]+' | tail -1)
+            [ -z "$rtype" ] && rtype="unknown"
+            # Extract resource name (last dotted segment)
+            rname=$(echo "$addr" | grep -oP '[^.]+$')
+            [ -z "$rname" ] && rname="unknown"
+            # Determine action
+            if echo "$line" | grep -q "will be created"; then action="create"
+            elif echo "$line" | grep -q "will be updated"; then action="update"
+            elif echo "$line" | grep -q "will be destroyed"; then action="delete"
+            elif echo "$line" | grep -q "must be replaced"; then action="replace"
+            else action="update"
+            fi
+            CHANGES=$(echo "$CHANGES" | jq --arg rt "$rtype" --arg rn "$rname" --arg act "$action" \
+              '. + [{"resource_type": $rt, "resource_name": $rn, "action": $act}]')
+          done < <(grep -E '^\s+#\s.+\s(will be|must be|has changed)' "$PLAN_FILE" || true)
+
+          DRIFT_DETECTED=true
+          CHANGE_COUNT=$(echo "$CHANGES" | jq 'length')
+          if [ "$CHANGE_COUNT" -eq 0 ]; then
+            DRIFT_DETECTED=false
+          fi
+
+          # Write JSON report
+          jq -n \
+            --arg ts "$TIMESTAMP" \
+            --arg env "$ENVIRONMENT" \
+            --arg branch "${GITHUB_REF_NAME:-unknown}" \
+            --arg run_id "$RUN_ID" \
+            --arg run_url "$RUN_URL" \
+            --argjson drift "$DRIFT_DETECTED" \
+            --argjson changes "$CHANGES" \
+            '{
+              timestamp: $ts,
+              environment: $env,
+              branch: $branch,
+              workflow_run_id: $run_id,
+              workflow_run_url: $run_url,
+              drift_detected: $drift,
+              resource_changes: $changes
+            }' > "$REPORT_FILE"
+
+          echo "✅ Drift report JSON generated at $REPORT_FILE ($CHANGE_COUNT changes)"
+
+      - name: Send Telegram Notification
+        if: steps.plan.outputs.drift_detected == 'true'
+        continue-on-error: true
+        env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
         run: |
           cd scripts/drift-detection
           # Check if the script exists
           if [ -f notify_telegram.py ]; then
             python notify_telegram.py \
-              --report ${{ github.workspace }}/plan_output.txt \
+              --report /tmp/drift_report.json \
               --environment ${{ github.event.inputs.environment || 'dev' }} \
               --run-id ${{ github.run_id }}
           else
