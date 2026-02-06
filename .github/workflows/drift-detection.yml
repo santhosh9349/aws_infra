@@ -160,10 +160,10 @@ jobs:
           echo "--- END DEBUG ---"
 
           # --- Step 1a: Extract changed resource addresses from plan text ---
-          # TFC plan output indentation varies; match any line with # <address> <action>
-          # Use flexible pattern: optional whitespace, #, space, address, action
-          grep -oP '(?<=#\s)[a-zA-Z0-9_."\[\]-]+(?=\s+(will be|must be|has changed))' "$PLAN_FILE" \
-            | sed 's/"//g' | sort -u > /tmp/changed_addresses.txt || true
+          # IMPORTANT: Do NOT strip quotes - state JSON uses module.vpc["dev"] format
+          # and addresses must match exactly
+          grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))' "$PLAN_FILE" \
+            | sort -u > /tmp/changed_addresses.txt || true
 
           ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
           echo "Found $ADDR_COUNT changed resource addresses:"
@@ -171,10 +171,10 @@ jobs:
 
           if [ "$ADDR_COUNT" -eq 0 ]; then
             echo "⚠️ No addresses extracted from plan. Trying alternative pattern..."
-            # Fallback: broader grep for any line with "will be created/destroyed/updated"
+            # Fallback: broader grep — keep quotes intact
             grep -E "(will be created|will be destroyed|will be updated|must be replaced)" "$PLAN_FILE" \
               | grep '#' \
-              | sed 's/.*#\s*//' | awk '{print $1}' | sed 's/"//g' | sort -u > /tmp/changed_addresses.txt || true
+              | sed 's/.*#\s*//' | awk '{print $1}' | sort -u > /tmp/changed_addresses.txt || true
             
             ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
             echo "Fallback found $ADDR_COUNT addresses:"
@@ -198,19 +198,26 @@ jobs:
             exit 0
           fi
 
+          # --- Debug: Show all addresses available in state ---
+          echo ""
+          echo "--- DEBUG: All resource addresses in state ---"
+          jq -r '.resources[] | (if .module then .module + "." else "" end) + .type + "." + .name' /tmp/state_raw.json 2>/dev/null | head -40
+          echo "--- END DEBUG ---"
+
           # --- Step 1c: For each changed address, find its ID in the state ---
           while read -r address; do
             [ -z "$address" ] && continue
             echo ""
             echo "Looking up ID for: $address"
 
-            # Parse address into module, type, name for state JSON matching
-            # Address format: module.<mod>.type.name OR type.name
-            # State JSON format: .resources[] with .module, .type, .name fields
-            # Construct the expected module path and resource type.name
+            # Match address against state. The state JSON has:
+            #   .module = "module.vpc[\"dev\"]"  (with escaped quotes in JSON)
+            #   .type = "aws_vpc"
+            #   .name = "this"
+            # Full address = module + "." + type + "." + name
+            # The plan address format is: module.vpc["dev"].aws_vpc.this (with actual quotes)
             
             id=$(jq -r --arg addr "$address" '
-              # Build full address from state resource entry
               .resources[] |
               (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
               select($full_addr == $addr) |
@@ -221,8 +228,9 @@ jobs:
               echo "$address|$id" >> "$ID_FILE"
               echo "  ✅ Found ID: $id"
             else
-              # Fallback: try terraform state show for this specific resource
+              # Fallback: try terraform state show (pass address with quotes)
               echo "  ⚠️ Not found in state JSON, trying terraform state show..."
+              # terraform state show needs the address exactly as terraform knows it
               id=$(terraform state show -no-color "$address" 2>/dev/null \
                 | grep -E '^\s+(id|arn)\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
