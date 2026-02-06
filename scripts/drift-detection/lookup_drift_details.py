@@ -132,7 +132,8 @@ def main():
             # Find addresses and actions
             # Regex captures: Group 1=Address (including brackets/quotes for for_each modules),
             # Group 2=Action phrase
-            matches = re.findall(r'^\s\s#\s([\w\.\-\"\[\]]+)\s((?:will be|must be|has)\s[\w-]+)', content, re.MULTILINE)
+            # "has changed" appears when Terraform detects external changes during refresh
+            matches = re.findall(r'^\s\s#\s([\w\.\-\"\[\]]+)\s((?:will be|must be)\s[\w-]+|has changed)', content, re.MULTILINE)
             for addr, action in matches:
                 drift_data[addr] = action
             
