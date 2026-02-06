@@ -206,12 +206,12 @@ jobs:
           # Add table header
           echo "### Drift Attribution Analysis" >> $ATTRIBUTION_FILE
           echo "" >> $ATTRIBUTION_FILE
-          echo "| Resource | Action | Actor | Event Time |" >> $ATTRIBUTION_FILE
-          echo "|---|---|---|---|" >> $ATTRIBUTION_FILE
+          echo "| Resource | Action | Actor Name | Actor ID | Event Time |" >> $ATTRIBUTION_FILE
+          echo "|---|---|---|---|---|" >> $ATTRIBUTION_FILE
 
           while IFS='|' read -r address resource_id; do
              if [ -z "$resource_id" ] || [ "$resource_id" == "null" ]; then
-                echo "| \`$address\` | Unknown | *(ID missing)* | - |" >> $ATTRIBUTION_FILE
+                echo "| \`$address\` | Unknown | - | *(ID missing)* | - |" >> $ATTRIBUTION_FILE
                 continue
              fi
 
@@ -225,14 +225,21 @@ jobs:
              
              if [ -n "$event" ] && [ "$event" != "None" ]; then
                 # Parse JSON string from CloudTrail
-                user=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.userName // "unknown"')
+                # Extract Actor ID (ARN or Principal ID)
+                actor_id=$(echo "$event" | jq -r '.userIdentity.arn // .userIdentity.principalId // "unknown"')
+                
+                # Extract Actor Name (UserName or Session Name from ARN)
+                actor_name=$(echo "$event" | jq -r '.userIdentity.userName // (.userIdentity.arn | split("/") | last) // "unknown"')
+                
                 time=$(echo "$event" | jq -r '.eventTime')
                 eventName=$(echo "$event" | jq -r '.eventName')
                 
+                echo "Found actor: $actor_name (ID: $actor_id)"
+                
                 # Format row for GitHub Issue
-                echo "| \`$address\` | $eventName | \`$user\` | $time |" >> $ATTRIBUTION_FILE
+                echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> $ATTRIBUTION_FILE
              else
-                echo "| \`$address\` | Unknown | *(No CloudTrail event found)* | - |" >> $ATTRIBUTION_FILE
+                echo "| \`$address\` | Unknown | - | *(No CloudTrail event found)* | - |" >> $ATTRIBUTION_FILE
              fi
           done < $IDS_FILE
           
