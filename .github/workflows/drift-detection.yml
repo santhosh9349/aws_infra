@@ -133,6 +133,16 @@ jobs:
           update_count=$(grep -c " will be updated in-place" "$PLAN_FILE" || true)
           delete_count=$(grep -c " will be destroyed" "$PLAN_FILE" || true)
           replace_count=$(grep -c " must be replaced" "$PLAN_FILE" || true)
+
+          create_count=$(printf '%s\n' "$create_count" | tail -n 1)
+          update_count=$(printf '%s\n' "$update_count" | tail -n 1)
+          delete_count=$(printf '%s\n' "$delete_count" | tail -n 1)
+          replace_count=$(printf '%s\n' "$replace_count" | tail -n 1)
+
+          create_count=${create_count:-0}
+          update_count=${update_count:-0}
+          delete_count=${delete_count:-0}
+          replace_count=${replace_count:-0}
           
           total_count=$((create_count + update_count + delete_count + replace_count))
           
