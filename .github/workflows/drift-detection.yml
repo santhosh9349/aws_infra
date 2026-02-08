@@ -162,8 +162,7 @@ jobs:
           # --- Step 1a: Extract changed resource addresses from plan text ---
           # IMPORTANT: Do NOT strip quotes - state JSON uses module.vpc["dev"] format
           # and addresses must match exactly
-          grep -E '^\s+#\s\S+\s+(will be|must be|has changed)' "$PLAN_FILE" \
-            | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/' \
+          sed -nE 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/p' "$PLAN_FILE" \
             | sort -u > /tmp/changed_addresses.txt || true
 
           ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
