@@ -129,10 +129,10 @@ jobs:
           
           # Count occurrences of actions in the plan output
           # Note: These patterns match standard Terraform plan output structure
-          create_count=$(grep -c " will be created" "$PLAN_FILE" || true)
-          update_count=$(grep -c " will be updated in-place" "$PLAN_FILE" || true)
-          delete_count=$(grep -c " will be destroyed" "$PLAN_FILE" || true)
-          replace_count=$(grep -c " must be replaced" "$PLAN_FILE" || true)
+          create_count=$(awk '/ will be created/ {count++} END {print count+0}' "$PLAN_FILE")
+          update_count=$(awk '/ will be updated in-place/ {count++} END {print count+0}' "$PLAN_FILE")
+          delete_count=$(awk '/ will be destroyed/ {count++} END {print count+0}' "$PLAN_FILE")
+          replace_count=$(awk '/ must be replaced/ {count++} END {print count+0}' "$PLAN_FILE")
           
           total_count=$((create_count + update_count + delete_count + replace_count))
           
