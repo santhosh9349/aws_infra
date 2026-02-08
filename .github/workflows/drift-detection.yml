@@ -162,8 +162,8 @@ jobs:
           # --- Step 1a: Extract changed resource addresses from plan text ---
           # IMPORTANT: Do NOT strip quotes - state JSON uses module.vpc["dev"] format
           # and addresses must match exactly
-          grep -E '^\s+#\s+[a-zA-Z0-9_.\"\[\]-]+\s+(will be|must be|has changed)' "$PLAN_FILE" \
-            | sed -E 's/^\s+#\s+([a-zA-Z0-9_.\"\[\]-]+)\s+(will be|must be|has changed).*/\1/' \
+          grep -E '^\s+#\s\S+\s+(will be|must be|has changed)' "$PLAN_FILE" \
+            | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/' \
             | sort -u > /tmp/changed_addresses.txt || true
 
           ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
@@ -213,7 +213,7 @@ jobs:
           while IFS= read -r line; do
             # Match resource header: # module.xxx.aws_yyy.zzz will be created
             if echo "$line" | grep -qE '^\s+#\s+.+\s+(will be|must be|has changed)'; then
-              current_addr=$(echo "$line" | sed -E 's/^\s+#\s+([a-zA-Z0-9_.\"\[\]-]+)\s+(will be|must be|has changed).*/\1/')
+              current_addr=$(echo "$line" | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/')
             fi
             # Match name attribute: + name = "some-name"
             if [ -n "$current_addr" ] && echo "$line" | grep -qE '^\s+\+\s+name\s+=\s+"[^"]+"'; then
@@ -614,7 +614,7 @@ jobs:
           # Build resource_changes array from plan output
           CHANGES="[]"
           while IFS= read -r line; do
-            addr=$(echo "$line" | sed -E 's/^\s+#\s+([a-zA-Z0-9_.\"\[\]-]+)\s+(will be|must be|has changed).*/\1/')
+            addr=$(echo "$line" | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/')
             [ -z "$addr" ] && continue
             # Extract resource type from address (last aws_xxx segment)
             rtype=$(echo "$addr" | grep -oE 'aws_[a-z0-9_]+' | tail -1)
