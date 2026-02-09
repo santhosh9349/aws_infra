@@ -9,7 +9,7 @@ on:
       environment:
         description: 'Environment to check for drift'
         required: true
-        default: 'dev4'
+        default: 'dev'
         type: choice
         options:
           - dev
@@ -76,7 +76,7 @@ jobs:
           RETRY_DELAY=300  # 5 minutes
           
           for attempt in $(seq 1 $MAX_RETRIES); do
-            echo "🔄 Terraform plann attempt $attempt of $MAX_RETRIES"
+            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
             
             # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
             terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
@@ -162,7 +162,7 @@ jobs:
           # --- Step 1a: Extract changed resource addresses from plan text ---
           # IMPORTANT: Do NOT strip quotes - state JSON uses module.vpc["dev"] format
           # and addresses must match exactly
-          grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))' "$PLAN_FILE" \
+          sed -nE 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/p' "$PLAN_FILE" \
             | sort -u > /tmp/changed_addresses.txt || true
 
           ADDR_COUNT=$(wc -l < /tmp/changed_addresses.txt | tr -d ' ')
@@ -193,8 +193,8 @@ jobs:
           echo "Parsing plan output for 'Refreshing state' IDs..."
           declare -A REFRESH_IDS
           while IFS= read -r line; do
-            addr=$(echo "$line" | grep -oP '^[^:]+(?=: Refreshing state)')
-            rid=$(echo "$line" | grep -oP '(?<=\[id=)[^\]]+')
+            addr=$(echo "$line" | sed -E 's/^([^:]+): Refreshing state.*/\1/')
+            rid=$(echo "$line" | sed -E 's/.*\[id=([^\]]+)\].*/\1/')
             if [ -n "$addr" ] && [ -n "$rid" ]; then
               REFRESH_IDS["$addr"]="$rid"
               echo "  📋 Refresh ID: $addr → $rid"
@@ -211,12 +211,12 @@ jobs:
           current_addr=""
           while IFS= read -r line; do
             # Match resource header: # module.xxx.aws_yyy.zzz will be created
-            if echo "$line" | grep -qP '^\s+#\s.+\s(will be|must be|has changed)'; then
-              current_addr=$(echo "$line" | grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))')
+            if echo "$line" | grep -qE '^\s+#\s+.+\s+(will be|must be|has changed)'; then
+              current_addr=$(echo "$line" | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/')
             fi
             # Match name attribute: + name = "some-name"
-            if [ -n "$current_addr" ] && echo "$line" | grep -qP '^\s+\+\s+name\s+=\s+"[^"]+"'; then
-              rname=$(echo "$line" | grep -oP '(?<=name\s+=\s+")[^"]+')
+            if [ -n "$current_addr" ] && echo "$line" | grep -qE '^\s+\+\s+name\s+=\s+"[^"]+"'; then
+              rname=$(echo "$line" | sed -E 's/.*name\s+=\s+"([^"]+)".*/\1/')
               if [ -n "$rname" ]; then
                 RESOURCE_NAMES["$current_addr"]="$rname"
                 current_addr=""
@@ -451,7 +451,7 @@ jobs:
               [ -n "${HAS_ID[$address]+x}" ] && continue
 
               # Extract resource type from address (e.g., module.xxx.aws_subnet.this → aws_subnet)
-              tf_type=$(echo "$address" | grep -oP 'aws_[a-z0-9_]+' | tail -1)
+              tf_type=$(echo "$address" | grep -oE 'aws_[a-z0-9_]+' | tail -1)
               delete_event=$(get_delete_event_name "$tf_type")
 
               if [ -n "$delete_event" ]; then
@@ -613,13 +613,13 @@ jobs:
           # Build resource_changes array from plan output
           CHANGES="[]"
           while IFS= read -r line; do
-            addr=$(echo "$line" | grep -oP '(?<=#\s)[a-zA-Z0-9_.\"\[\]-]+(?=\s+(will be|must be|has changed))')
+            addr=$(echo "$line" | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/')
             [ -z "$addr" ] && continue
             # Extract resource type from address (last aws_xxx segment)
-            rtype=$(echo "$addr" | grep -oP 'aws_[a-z0-9_]+' | tail -1)
+            rtype=$(echo "$addr" | grep -oE 'aws_[a-z0-9_]+' | tail -1)
             [ -z "$rtype" ] && rtype="unknown"
             # Extract resource name (last dotted segment)
-            rname=$(echo "$addr" | grep -oP '[^.]+$')
+            rname=$(echo "$addr" | grep -oE '[^.]+$')
             [ -z "$rname" ] && rname="unknown"
             # Determine action
             if echo "$line" | grep -q "will be created"; then action="create"
