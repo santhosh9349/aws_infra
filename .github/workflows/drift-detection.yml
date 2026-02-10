@@ -158,8 +158,9 @@ jobs:
           is_arn() {
             local str="$1"
             # AWS ARN format: arn:aws:service:region:account-id:resource
-            # Region and account-id can be empty for some services (e.g., IAM)
-            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:.+ ]]
+            # Region and account-id can be empty for some services (e.g., IAM, S3)
+            # Account ID must be exactly 12 digits when present
+            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12})?:.+ ]]
           }
 
           # --- Debug: Show plan lines that contain "will be" to understand format ---
@@ -526,7 +527,7 @@ jobs:
             # Build set of addresses that already have ARNs/IDs
             declare -A HAS_ID
             if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
-              while IFS='|' read -r addr _ _; do
+              while IFS='|' read -r addr id_type resource_identifier; do
                 HAS_ID["$addr"]=1
               done < "$RESOURCE_FILE"
             fi
