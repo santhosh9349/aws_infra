@@ -159,8 +159,8 @@ jobs:
             local str="$1"
             # AWS ARN format: arn:aws:service:region:account-id:resource
             # Region and account-id can be empty for some services (e.g., IAM, S3)
-            # Account ID must be exactly 12 digits when present
-            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12})?:.+ ]]
+            # Account ID must be either empty or exactly 12 digits (no partial matches)
+            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12}|):.+ ]]
           }
 
           # --- Debug: Show plan lines that contain "will be" to understand format ---
