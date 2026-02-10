@@ -151,8 +151,16 @@ jobs:
         run: |
           echo "=== Step 1: Extracting resource ARNs for CloudTrail attribution ==="
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
-          ID_FILE="/tmp/resource_ids.txt"
-          > "$ID_FILE"
+          RESOURCE_FILE="/tmp/resource_ids.txt"
+          > "$RESOURCE_FILE"
+
+          # Helper function: Check if a string is an AWS ARN
+          is_arn() {
+            local str="$1"
+            # AWS ARN format: arn:aws:service:region:account-id:resource
+            # Region and account-id can be empty for some services (e.g., IAM)
+            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]*:.+ ]]
+          }
 
           # --- Debug: Show plan lines that contain "will be" to understand format ---
           echo "--- DEBUG: Lines containing 'will be' in plan output ---"
@@ -199,7 +207,7 @@ jobs:
             if [ -n "$addr" ] && [ -n "$rid" ]; then
               REFRESH_IDS["$addr"]="$rid"
               # If the ID looks like an ARN (starts with arn:), store it as ARN too
-              if [[ "$rid" =~ ^arn:aws: ]]; then
+              if is_arn "$rid"; then
                 REFRESH_ARNS["$addr"]="$rid"
                 echo "  📋 Refresh ARN: $addr → $rid"
               else
@@ -269,7 +277,7 @@ jobs:
             if [ -z "$arn" ] && [ -n "${REFRESH_IDS[$address]+x}" ]; then
               id="${REFRESH_IDS[$address]}"
               # Check if this ID is actually an ARN
-              if [[ "$id" =~ ^arn:aws: ]]; then
+              if is_arn "$id"; then
                 arn="$id"
                 echo "  ✅ Found ARN (from refresh ID): $arn"
               else
@@ -304,7 +312,7 @@ jobs:
               
               if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
                 # Check if the ID is actually an ARN
-                if [[ "$id" =~ ^arn:aws: ]]; then
+                if is_arn "$id"; then
                   arn="$id"
                   id=""
                   echo "  ✅ Found ARN (from state JSON id field): $arn"
@@ -332,7 +340,7 @@ jobs:
               ' /tmp/state_raw.json 2>/dev/null) || true
 
               if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "" ]; then
-                if [[ "$result" =~ ^arn:aws: ]]; then
+                if is_arn "$result"; then
                   arn="$result"
                   echo "  ✅ Found ARN (from state JSON with index_key): $arn"
                 else
@@ -373,9 +381,9 @@ jobs:
 
             # Store ARN if found, otherwise store ID
             if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
-              echo "$address|arn|$arn" >> "$ID_FILE"
+              echo "$address|arn|$arn" >> "$RESOURCE_FILE"
             elif [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-              echo "$address|id|$id" >> "$ID_FILE"
+              echo "$address|id|$id" >> "$RESOURCE_FILE"
             else
               echo "  ❌ Could not resolve ARN or ID for $address"
             fi
@@ -383,17 +391,17 @@ jobs:
 
           echo ""
           echo "=== Resource ARN/ID extraction complete ==="
-          ID_COUNT=$(wc -l < "$ID_FILE" | tr -d ' ')
-          ARN_COUNT=$(grep -c '|arn|' "$ID_FILE" 2>/dev/null || echo "0")
+          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ')
+          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null || echo "0")
           echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
-          cat "$ID_FILE"
+          cat "$RESOURCE_FILE"
 
       - name: Query CloudTrail for Attribution
         id: cloudtrail
         if: steps.plan.outputs.exit_code == '2'
         run: |
           echo "=== Step 2: Querying CloudTrail for actor attribution ==="
-          IDS_FILE="/tmp/resource_ids.txt"
+          RESOURCE_FILE="/tmp/resource_ids.txt"
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ATTRIBUTION_FILE="/tmp/attribution_table.md"
           ADDRESSES_FILE="/tmp/changed_addresses.txt"
@@ -460,11 +468,11 @@ jobs:
           MISS_COUNT=0
           START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
-          # Process resources that have IDs/ARNs resolved
-          if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
+          # Process resources that have ARNs/IDs resolved
+          if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
             while IFS='|' read -r address id_type resource_identifier; do
                if [ -z "$resource_identifier" ] || [ "$resource_identifier" == "null" ]; then
-                  echo "| \`$address\` | - | - | *(ID/ARN not resolved)* | - |" >> "$ATTRIBUTION_FILE"
+                  echo "| \`$address\` | - | - | *(ARN/ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                   continue
                fi
@@ -509,18 +517,18 @@ jobs:
                fi
                
                sleep 0.5
-            done < "$IDS_FILE"
+            done < "$RESOURCE_FILE"
           fi
 
-          # For resources with no IDs at all, try CloudTrail event name lookup
+          # For resources with no ARNs/IDs at all, try CloudTrail event name lookup
           # This handles "will be created" drift where resources were deleted from AWS
           if [ -f "$ADDRESSES_FILE" ]; then
-            # Build set of addresses that already have IDs/ARNs
+            # Build set of addresses that already have ARNs/IDs
             declare -A HAS_ID
-            if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
+            if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
               while IFS='|' read -r addr _ _; do
                 HAS_ID["$addr"]=1
-              done < "$IDS_FILE"
+              done < "$RESOURCE_FILE"
             fi
 
             while read -r address; do
