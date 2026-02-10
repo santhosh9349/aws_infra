@@ -144,12 +144,12 @@ jobs:
           
           echo "Plan Summary: $create_count creates, $update_count updates, $delete_count deletes, $replace_count replacements."
 
-      - name: Extract Drifted Resource IDs
+      - name: Extract Drifted Resource ARNs
         id: extract_ids
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          echo "=== Step 1: Extracting resource IDs for CloudTrail attribution ==="
+          echo "=== Step 1: Extracting resource ARNs for CloudTrail attribution ==="
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ID_FILE="/tmp/resource_ids.txt"
           > "$ID_FILE"
@@ -186,21 +186,28 @@ jobs:
             exit 0
           fi
 
-          # --- Step 1b: Extract IDs from "Refreshing state..." lines in plan output ---
+          # --- Step 1b: Extract ARNs/IDs from "Refreshing state..." lines in plan output ---
           # These lines appear during the refresh phase and contain the actual resource IDs
           # Format: module.vpc["dev"].aws_vpc.this: Refreshing state... [id=vpc-xxx]
           echo ""
-          echo "Parsing plan output for 'Refreshing state' IDs..."
+          echo "Parsing plan output for 'Refreshing state' IDs/ARNs..."
           declare -A REFRESH_IDS
+          declare -A REFRESH_ARNS
           while IFS= read -r line; do
             addr=$(echo "$line" | sed -E 's/^([^:]+): Refreshing state.*/\1/')
             rid=$(echo "$line" | sed -E 's/.*\[id=([^\]]+)\].*/\1/')
             if [ -n "$addr" ] && [ -n "$rid" ]; then
               REFRESH_IDS["$addr"]="$rid"
-              echo "  📋 Refresh ID: $addr → $rid"
+              # If the ID looks like an ARN (starts with arn:), store it as ARN too
+              if [[ "$rid" =~ ^arn:aws: ]]; then
+                REFRESH_ARNS["$addr"]="$rid"
+                echo "  📋 Refresh ARN: $addr → $rid"
+              else
+                echo "  📋 Refresh ID: $addr → $rid"
+              fi
             fi
           done < <(grep 'Refreshing state\.\.\. \[id=' "$PLAN_FILE" 2>/dev/null || true)
-          echo "Found ${#REFRESH_IDS[@]} IDs from refresh lines"
+          echo "Found ${#REFRESH_IDS[@]} IDs (${#REFRESH_ARNS[@]} ARNs) from refresh lines"
 
           # --- Step 1c: Extract resource names from plan output for "will be created" ---
           # For resources being created (previously deleted), extract the "name" attribute
@@ -243,39 +250,75 @@ jobs:
           jq -r '.resources[] | (if .module then .module + "." else "" end) + .type + "." + .name' /tmp/state_raw.json 2>/dev/null | head -40
           echo "--- END DEBUG ---"
 
-          # --- Step 1e: For each changed address, find its ID using all sources ---
+          # --- Step 1e: For each changed address, find its ARN/ID using all sources ---
           while read -r address; do
             [ -z "$address" ] && continue
             echo ""
-            echo "Looking up ID for: $address"
+            echo "Looking up ARN/ID for: $address"
 
             id=""
+            arn=""
 
-            # Priority 1: Check refresh line IDs (most reliable - directly from plan output)
-            if [ -n "${REFRESH_IDS[$address]+x}" ]; then
-              id="${REFRESH_IDS[$address]}"
-              echo "  ✅ Found ID (from refresh line): $id"
+            # Priority 1: Check refresh line ARNs (most reliable - directly from plan output)
+            if [ -n "${REFRESH_ARNS[$address]+x}" ]; then
+              arn="${REFRESH_ARNS[$address]}"
+              echo "  ✅ Found ARN (from refresh line): $arn"
             fi
 
-            # Priority 2: State JSON lookup
-            if [ -z "$id" ] || [ "$id" = "null" ]; then
+            # Priority 2: Check refresh line IDs if no ARN yet
+            if [ -z "$arn" ] && [ -n "${REFRESH_IDS[$address]+x}" ]; then
+              id="${REFRESH_IDS[$address]}"
+              # Check if this ID is actually an ARN
+              if [[ "$id" =~ ^arn:aws: ]]; then
+                arn="$id"
+                echo "  ✅ Found ARN (from refresh ID): $arn"
+              else
+                echo "  ✅ Found ID (from refresh line): $id"
+              fi
+            fi
+
+            # Priority 3: State JSON lookup - prefer ARN over ID
+            if [ -z "$arn" ]; then
+              arn=$(jq -r --arg addr "$address" '
+                .resources[] |
+                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
+                select($full_addr == $addr) |
+                .instances[0].attributes.arn // empty
+              ' /tmp/state_raw.json 2>/dev/null) || true
+              
+              if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
+                echo "  ✅ Found ARN (from state JSON): $arn"
+              else
+                arn=""
+              fi
+            fi
+
+            # Priority 4: State JSON lookup for ID if no ARN
+            if [ -z "$id" ] && [ -z "$arn" ]; then
               id=$(jq -r --arg addr "$address" '
                 .resources[] |
                 (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
                 select($full_addr == $addr) |
-                .instances[0].attributes.id // .instances[0].attributes.arn // empty
+                .instances[0].attributes.id // empty
               ' /tmp/state_raw.json 2>/dev/null) || true
               
               if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                echo "  ✅ Found ID (from state JSON): $id"
+                # Check if the ID is actually an ARN
+                if [[ "$id" =~ ^arn:aws: ]]; then
+                  arn="$id"
+                  id=""
+                  echo "  ✅ Found ARN (from state JSON id field): $arn"
+                else
+                  echo "  ✅ Found ID (from state JSON): $id"
+                fi
               else
                 id=""
               fi
             fi
 
-            # Priority 3: State JSON lookup handling for_each resources with index_key
-            if [ -z "$id" ]; then
-              id=$(jq -r --arg addr "$address" '
+            # Priority 5: State JSON lookup handling for_each resources with index_key
+            if [ -z "$id" ] && [ -z "$arn" ]; then
+              result=$(jq -r --arg addr "$address" '
                 .resources[] |
                 . as $res |
                 .instances[] |
@@ -285,46 +328,64 @@ jobs:
                   (if .index_key then "[\"" + (.index_key | tostring) + "\"]" else "" end)
                 ) as $full_addr |
                 select($full_addr == $addr) |
-                .attributes.id // .attributes.arn // empty
+                (.attributes.arn // .attributes.id // empty)
               ' /tmp/state_raw.json 2>/dev/null) || true
 
-              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                echo "  ✅ Found ID (from state JSON with index_key): $id"
-              else
-                id=""
+              if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "" ]; then
+                if [[ "$result" =~ ^arn:aws: ]]; then
+                  arn="$result"
+                  echo "  ✅ Found ARN (from state JSON with index_key): $arn"
+                else
+                  id="$result"
+                  echo "  ✅ Found ID (from state JSON with index_key): $id"
+                fi
               fi
             fi
 
-            # Priority 4: terraform state show fallback
-            if [ -z "$id" ]; then
-              id=$(terraform state show -no-color "$address" 2>/dev/null \
-                | grep -E '^\s+(id|arn)\s+=' | head -1 \
+            # Priority 6: terraform state show fallback
+            if [ -z "$id" ] && [ -z "$arn" ]; then
+              # First try to get ARN
+              arn=$(terraform state show -no-color "$address" 2>/dev/null \
+                | grep -E '^\s+arn\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
 
-              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                echo "  ✅ Found ID (from terraform state show): $id"
+              if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
+                echo "  ✅ Found ARN (from terraform state show): $arn"
               else
-                id=""
+                # Try to get ID as fallback
+                id=$(terraform state show -no-color "$address" 2>/dev/null \
+                  | grep -E '^\s+id\s+=' | head -1 \
+                  | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
+
+                if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+                  echo "  ✅ Found ID (from terraform state show): $id"
+                else
+                  id=""
+                fi
               fi
             fi
 
-            # Priority 5: Use resource name from plan output as fallback identifier
-            if [ -z "$id" ] && [ -n "${RESOURCE_NAMES[$address]+x}" ]; then
+            # Priority 7: Use resource name from plan output as fallback identifier
+            if [ -z "$id" ] && [ -z "$arn" ] && [ -n "${RESOURCE_NAMES[$address]+x}" ]; then
               id="${RESOURCE_NAMES[$address]}"
               echo "  ℹ️ Using resource name as identifier: $id"
             fi
 
-            if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-              echo "$address|$id" >> "$ID_FILE"
+            # Store ARN if found, otherwise store ID
+            if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
+              echo "$address|arn|$arn" >> "$ID_FILE"
+            elif [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+              echo "$address|id|$id" >> "$ID_FILE"
             else
-              echo "  ❌ Could not resolve ID for $address"
+              echo "  ❌ Could not resolve ARN or ID for $address"
             fi
           done < /tmp/changed_addresses.txt
 
           echo ""
-          echo "=== Resource ID extraction complete ==="
+          echo "=== Resource ARN/ID extraction complete ==="
           ID_COUNT=$(wc -l < "$ID_FILE" | tr -d ' ')
-          echo "IDs resolved: $ID_COUNT / $ADDR_COUNT"
+          ARN_COUNT=$(grep -c '|arn|' "$ID_FILE" 2>/dev/null || echo "0")
+          echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
           cat "$ID_FILE"
 
       - name: Query CloudTrail for Attribution
@@ -399,22 +460,38 @@ jobs:
           MISS_COUNT=0
           START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
-          # Process resources that have IDs resolved
+          # Process resources that have IDs/ARNs resolved
           if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
-            while IFS='|' read -r address resource_id; do
-               if [ -z "$resource_id" ] || [ "$resource_id" == "null" ]; then
-                  echo "| \`$address\` | - | - | *(ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
+            while IFS='|' read -r address id_type resource_identifier; do
+               if [ -z "$resource_identifier" ] || [ "$resource_identifier" == "null" ]; then
+                  echo "| \`$address\` | - | - | *(ID/ARN not resolved)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                   continue
                fi
 
-               echo "Querying CloudTrail for: $resource_id ($address)..."
+               echo "Querying CloudTrail for: $resource_identifier ($address, type: $id_type)..."
                
-               event=$(aws cloudtrail lookup-events \
-                 --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
-                 --start-time "$START_TIME" \
-                 --max-results 1 \
-                 --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+               # Determine the best CloudTrail query approach based on identifier type
+               if [ "$id_type" = "arn" ]; then
+                 # For ARNs, we have two approaches:
+                 # 1. Query by ResourceName with the ARN (works for most services)
+                 # 2. Parse events and check resources field (more accurate but complex)
+                 # We'll use approach 1 for simplicity
+                 echo "  Using ARN-based query..."
+                 event=$(aws cloudtrail lookup-events \
+                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
+                   --start-time "$START_TIME" \
+                   --max-results 1 \
+                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+               else
+                 # For IDs, use ResourceName attribute (backward compatibility)
+                 echo "  Using ID-based query..."
+                 event=$(aws cloudtrail lookup-events \
+                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
+                   --start-time "$START_TIME" \
+                   --max-results 1 \
+                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+               fi
                
                if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
                   extract_actor "$event"
@@ -426,7 +503,7 @@ jobs:
                   echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
                   FOUND_COUNT=$((FOUND_COUNT + 1))
                else
-                  echo "  ❌ No CloudTrail event found for $resource_id"
+                  echo "  ❌ No CloudTrail event found for $resource_identifier"
                   echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                fi
@@ -438,10 +515,10 @@ jobs:
           # For resources with no IDs at all, try CloudTrail event name lookup
           # This handles "will be created" drift where resources were deleted from AWS
           if [ -f "$ADDRESSES_FILE" ]; then
-            # Build set of addresses that already have IDs
+            # Build set of addresses that already have IDs/ARNs
             declare -A HAS_ID
             if [ -f "$IDS_FILE" ] && [ -s "$IDS_FILE" ]; then
-              while IFS='|' read -r addr _; do
+              while IFS='|' read -r addr _ _; do
                 HAS_ID["$addr"]=1
               done < "$IDS_FILE"
             fi
