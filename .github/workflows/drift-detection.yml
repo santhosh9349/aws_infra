@@ -294,8 +294,7 @@ jobs:
             if [ -z "$arn" ]; then
               arn=$(jq -r --arg addr "$address" '
                 .resources[] |
-                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
-                select($full_addr == $addr) |
+                select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
                 .instances[0].attributes.arn // empty
               ' /tmp/state_raw.json 2>/dev/null) || true
               
@@ -310,8 +309,7 @@ jobs:
             if [ -z "$id" ] && [ -z "$arn" ]; then
               id=$(jq -r --arg addr "$address" '
                 .resources[] |
-                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
-                select($full_addr == $addr) |
+                select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
                 .instances[0].attributes.id // empty
               ' /tmp/state_raw.json 2>/dev/null) || true
               
