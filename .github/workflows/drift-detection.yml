@@ -497,27 +497,26 @@ jobs:
 
                echo "Querying CloudTrail for: $resource_identifier ($address, type: $id_type)..."
                
-               # CloudTrail lookup-events ResourceName attribute documentation:
-               # https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events-cli.html
-               # ResourceName typically expects AWS resource IDs (e.g., vpc-xxx, subnet-xxx, i-xxx)
-               # For some services, it may also accept ARNs, but resource IDs are more reliable
+               # CloudTrail lookup-events ResourceName attribute:
+               # Based on AWS best practices and testing, ResourceName typically expects AWS resource 
+               # IDs (e.g., vpc-xxx, subnet-xxx, i-xxx) rather than full ARNs for most reliable results.
+               # Reference: https://docs.aws.amazon.com/cli/latest/reference/cloudtrail/lookup-events.html
+               # For some services, it may also accept ARNs, but resource IDs are more reliable.
                
                # Extract resource ID from ARN if we have an ARN
                query_value="$resource_identifier"
                if [ "$id_type" = "arn" ]; then
                  # Try to extract resource ID from ARN
                  # ARN formats vary by service:
-                 # - arn:partition:service:region:account:resource-type/resource-id (e.g., EC2, VPC)
-                 # - arn:partition:service:region:account:resource-type:resource-id (e.g., IAM)
+                 # - arn:partition:service:region:account:resource-type/resource-id (e.g., EC2: vpc/vpc-xxx)
+                 # - arn:partition:service:region:account:resource-type:resource-id (e.g., IAM: role:role-name)
+                 # - arn:partition:service:region:account:resource-type/path/resource-id (e.g., IAM: role/path/role-name)
                  # - arn:partition:s3:::bucket-name (S3 buckets)
-                 # - arn:partition:s3:::bucket-name/key (S3 objects)
                  
-                 # For most AWS resources in this drift detection (VPC, EC2, subnets, etc.),
-                 # the resource ID is after the last / or : separator
-                 # Extract the part after the last colon, then take first part before any /
-                 resource_part=$(echo "$resource_identifier" | sed 's/.*://')
-                 # Now extract just the resource ID (before any path separators)
-                 resource_id=$(echo "$resource_part" | sed 's/\/.*//')
+                 # For CloudTrail ResourceName, we typically want the actual resource ID
+                 # For most services (VPC, EC2, Subnet), this is the last segment after : or /
+                 # Extract using awk to get the last segment after splitting on both : and /
+                 resource_id=$(echo "$resource_identifier" | awk -F'[/:]' '{print $NF}')
                  
                  if [ -n "$resource_id" ] && [ "$resource_id" != "$resource_identifier" ]; then
                    echo "  Extracted resource ID from ARN: $resource_id"
