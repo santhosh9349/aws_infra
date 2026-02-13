@@ -395,8 +395,10 @@ jobs:
             # Store ARN if found, otherwise store ID
             if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
               echo "$address|arn|$arn" >> "$RESOURCE_FILE"
+              echo "  ✅ EXTRACTED ARN: $arn"
             elif [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
               echo "$address|id|$id" >> "$RESOURCE_FILE"
+              echo "  ✅ EXTRACTED ID: $id"
             else
               echo "  ❌ Could not resolve ARN or ID for $address"
             fi
@@ -495,21 +497,59 @@ jobs:
 
                echo "Querying CloudTrail for: $resource_identifier ($address, type: $id_type)..."
                
-               # Determine the best CloudTrail query approach based on identifier type
+               # CloudTrail lookup-events ResourceName attribute:
+               # Based on AWS best practices and testing, ResourceName typically expects AWS resource 
+               # IDs (e.g., vpc-xxx, subnet-xxx, i-xxx) rather than full ARNs for most reliable results.
+               # Reference: https://docs.aws.amazon.com/cli/latest/reference/cloudtrail/lookup-events.html
+               # For some services, it may also accept ARNs, but resource IDs are more reliable.
+               
+               # Extract resource ID from ARN if we have an ARN
+               query_value="$resource_identifier"
                if [ "$id_type" = "arn" ]; then
-                 # For ARNs, we have two approaches:
-                 # 1. Query by ResourceName with the ARN (works for most services)
-                 # 2. Parse events and check resources field (more accurate but complex)
-                 # We'll use approach 1 for simplicity
-                 echo "  Using ARN-based query..."
-                 event=$(aws cloudtrail lookup-events \
-                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                   --start-time "$START_TIME" \
-                   --max-results 1 \
-                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+                 # Try to extract resource ID from ARN
+                 # ARN formats vary by service:
+                 # - arn:partition:service:region:account:resource-type/resource-id (e.g., EC2: vpc/vpc-xxx)
+                 # - arn:partition:service:region:account:resource-type:resource-id (e.g., IAM: role:role-name)
+                 # - arn:partition:service:region:account:resource-type/path/resource-id (e.g., IAM: role/path/role-name)
+                 # - arn:partition:s3:::bucket-name (S3 buckets)
+                 
+                 # For CloudTrail ResourceName, we typically want the actual resource ID
+                 # For most services (VPC, EC2, Subnet), this is the last segment after : or /
+                 # Extract using awk to get the last segment after splitting on both : and /
+                 resource_id=$(echo "$resource_identifier" | awk -F'[/:]' '{print $NF}')
+                 
+                 if [ -n "$resource_id" ] && [ "$resource_id" != "$resource_identifier" ]; then
+                   echo "  Extracted resource ID from ARN: $resource_id"
+                   # Try query with resource ID first
+                   echo "  Querying CloudTrail with resource ID: $resource_id"
+                   event=$(aws cloudtrail lookup-events \
+                     --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
+                     --start-time "$START_TIME" \
+                     --max-results 1 \
+                     --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+                   
+                   # If no result, try with full ARN as fallback
+                   if [ -z "$event" ] || [ "$event" = "None" ] || [ "$event" = "null" ]; then
+                     echo "  No event found with resource ID, trying with full ARN: $resource_identifier"
+                     event=$(aws cloudtrail lookup-events \
+                       --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
+                       --start-time "$START_TIME" \
+                       --max-results 1 \
+                       --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+                   fi
+                 else
+                   # Couldn't extract ID from ARN, use ARN directly
+                   echo "  Querying CloudTrail with ARN: $resource_identifier"
+                   event=$(aws cloudtrail lookup-events \
+                     --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
+                     --start-time "$START_TIME" \
+                     --max-results 1 \
+                     --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+                 fi
                else
-                 # For IDs, use ResourceName attribute (backward compatibility)
-                 echo "  Using ID-based query..."
+                 # For IDs, use ResourceName attribute directly
+                 # This should be an AWS resource ID (vpc-xxx, subnet-xxx, etc.), not a Terraform name
+                 echo "  Querying CloudTrail with resource ID: $resource_identifier"
                  event=$(aws cloudtrail lookup-events \
                    --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
                    --start-time "$START_TIME" \
