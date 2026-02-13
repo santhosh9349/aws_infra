@@ -157,10 +157,14 @@ jobs:
           # Helper function: Check if a string is an AWS ARN
           is_arn() {
             local str="$1"
-            # AWS ARN format: arn:aws:service:region:account-id:resource
-            # Region and account-id can be empty for some services (e.g., IAM, S3)
-            # Account ID must be either empty or exactly 12 digits (no partial matches)
-            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12}|):.+ ]]
+            # AWS ARN format: arn:partition:service:region:account-id:resource
+            # - Partition: aws, aws-cn (China), aws-us-gov (GovCloud)
+            # - Service: lowercase letters, numbers, hyphens (e.g., ec2, elasticloadbalancing)
+            # - Region: lowercase letters, numbers, hyphens, or empty (e.g., us-east-1, cn-north-1, or empty for global services)
+            # - Account ID: exactly 12 digits, empty (for S3), or 'aws' (for AWS managed IAM policies)
+            # - Resource: any characters (includes paths, IDs, etc.)
+            # Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html
+            [[ "$str" =~ ^arn:(aws|aws-cn|aws-us-gov):[a-z0-9-]+:[a-z0-9-]*:(([0-9]{12})|aws|):.+ ]]
           }
 
           # --- Debug: Show plan lines that contain "will be" to understand format ---
@@ -287,16 +291,25 @@ jobs:
             fi
 
             # Priority 3: State JSON lookup - prefer ARN over ID
+            # Check multiple possible ARN field names: arn, policy_arn, or any *_arn field
             if [ -z "$arn" ]; then
               arn=$(jq -r --arg addr "$address" '
                 .resources[] |
-                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
-                select($full_addr == $addr) |
-                .instances[0].attributes.arn // empty
-              ' /tmp/state_raw.json 2>/dev/null) || true
+                select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
+                .instances[0].attributes |
+                # Try standard .arn first, then policy_arn, then any field ending in _arn
+                (.arn // .policy_arn // (to_entries[] | select(.key | endswith("_arn")) | .value) // empty) |
+                select(. != null and . != "")
+              ' /tmp/state_raw.json 2>/dev/null | head -1) || true
               
               if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
-                echo "  ✅ Found ARN (from state JSON): $arn"
+                # Validate that it's actually an ARN
+                if is_arn "$arn"; then
+                  echo "  ✅ Found ARN (from state JSON): $arn"
+                else
+                  echo "  ⚠️ Found ARN-like field but not valid ARN format: $arn"
+                  arn=""
+                fi
               else
                 arn=""
               fi
@@ -306,8 +319,7 @@ jobs:
             if [ -z "$id" ] && [ -z "$arn" ]; then
               id=$(jq -r --arg addr "$address" '
                 .resources[] |
-                (if .module then .module + "." else "" end) + .type + "." + .name as $full_addr |
-                select($full_addr == $addr) |
+                select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
                 .instances[0].attributes.id // empty
               ' /tmp/state_raw.json 2>/dev/null) || true
               
@@ -392,8 +404,11 @@ jobs:
 
           echo ""
           echo "=== Resource ARN/ID extraction complete ==="
-          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ')
-          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null || echo "0")
+          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
+          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null | head -1)
+          # Ensure variables are valid integers (default to 0 if empty)
+          ID_COUNT=${ID_COUNT:-0}
+          ARN_COUNT=${ARN_COUNT:-0}
           echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
           cat "$RESOURCE_FILE"
 
