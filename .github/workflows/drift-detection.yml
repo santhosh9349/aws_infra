@@ -157,10 +157,14 @@ jobs:
           # Helper function: Check if a string is an AWS ARN
           is_arn() {
             local str="$1"
-            # AWS ARN format: arn:aws:service:region:account-id:resource
-            # Region and account-id can be empty for some services (e.g., IAM, S3)
-            # Account ID must be either empty or exactly 12 digits (no partial matches)
-            [[ "$str" =~ ^arn:aws:[a-z0-9-]+:[a-z0-9-]*:([0-9]{12}|):.+ ]]
+            # AWS ARN format: arn:partition:service:region:account-id:resource
+            # - Partition: aws, aws-cn (China), aws-us-gov (GovCloud)
+            # - Service: lowercase letters, numbers, hyphens (e.g., ec2, elasticloadbalancing)
+            # - Region: lowercase letters, numbers, hyphens, or empty (e.g., us-east-1, cn-north-1, or empty for global services)
+            # - Account ID: exactly 12 digits or empty (e.g., for S3, IAM global resources)
+            # - Resource: any characters (includes paths, IDs, etc.)
+            # Reference: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html
+            [[ "$str" =~ ^arn:(aws|aws-cn|aws-us-gov):[a-z0-9-]+:[a-z0-9-]*:([0-9]{12}|):.+ ]]
           }
 
           # --- Debug: Show plan lines that contain "will be" to understand format ---
