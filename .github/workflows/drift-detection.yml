@@ -396,8 +396,11 @@ jobs:
 
           echo ""
           echo "=== Resource ARN/ID extraction complete ==="
-          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ')
-          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null || echo "0")
+          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
+          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null | head -1)
+          # Ensure variables are valid integers (default to 0 if empty)
+          ID_COUNT=${ID_COUNT:-0}
+          ARN_COUNT=${ARN_COUNT:-0}
           echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
           cat "$RESOURCE_FILE"
 
