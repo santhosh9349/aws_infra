@@ -505,11 +505,21 @@ jobs:
                # Extract resource ID from ARN if we have an ARN
                query_value="$resource_identifier"
                if [ "$id_type" = "arn" ]; then
-                 # Try to extract resource ID from ARN (last part after the last : or /)
-                 # ARN format: arn:partition:service:region:account:resource-type/resource-id
-                 # or arn:partition:service:region:account:resource-type:resource-id
-                 resource_id=$(echo "$resource_identifier" | grep -oE '[^:/]+$')
-                 if [ -n "$resource_id" ]; then
+                 # Try to extract resource ID from ARN
+                 # ARN formats vary by service:
+                 # - arn:partition:service:region:account:resource-type/resource-id (e.g., EC2, VPC)
+                 # - arn:partition:service:region:account:resource-type:resource-id (e.g., IAM)
+                 # - arn:partition:s3:::bucket-name (S3 buckets)
+                 # - arn:partition:s3:::bucket-name/key (S3 objects)
+                 
+                 # For most AWS resources in this drift detection (VPC, EC2, subnets, etc.),
+                 # the resource ID is after the last / or : separator
+                 # Extract the part after the last colon, then take first part before any /
+                 resource_part=$(echo "$resource_identifier" | sed 's/.*://')
+                 # Now extract just the resource ID (before any path separators)
+                 resource_id=$(echo "$resource_part" | sed 's/\/.*//')
+                 
+                 if [ -n "$resource_id" ] && [ "$resource_id" != "$resource_identifier" ]; then
                    echo "  Extracted resource ID from ARN: $resource_id"
                    # Try query with resource ID first
                    echo "  Querying CloudTrail with resource ID: $resource_id"
