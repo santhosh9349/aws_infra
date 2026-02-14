@@ -290,8 +290,11 @@ jobs:
                   (if .index_key then "[\"" + (.index_key | tostring) + "\"]" else "" end)
                 ) as $full_addr |
                 select($full_addr == $addr) |
-                .attributes.arn // empty
-              ' /tmp/state_raw.json 2>/dev/null) || true
+                .attributes |
+                # Try standard .arn first, then policy_arn, then any field ending in _arn
+                (.arn // .policy_arn // (to_entries[] | select(.key | endswith("_arn")) | .value) // empty) |
+                select(. != null and . != "")
+              ' /tmp/state_raw.json 2>/dev/null | head -1) || true
 
               if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "" ]; then
                 if is_arn "$result"; then
@@ -303,8 +306,9 @@ jobs:
 
             # Priority 4: terraform state show fallback
             if [ -z "$arn" ]; then
+              # Try to get ARN field (try multiple ARN field names)
               arn=$(terraform state show -no-color "$address" 2>/dev/null \
-                | grep -E '^\s+arn\s+=' | head -1 \
+                | grep -E '^\s+(arn|policy_arn|\w*_arn)\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
 
               if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then

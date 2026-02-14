@@ -134,9 +134,8 @@ def main():
             for addr, action in matches:
                 drift_data[addr] = action
             
-            # Extract IDs from "Refreshing state..." lines
+            # Extract ARNs from "Refreshing state..." lines
             # Only store if the ID is an ARN
-            refresh_arns = {} # Map address -> ARN
             refresh_matches = re.findall(r'^([\w\.\-\"\[\]]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
             for addr, rid in refresh_matches:
                 # Only store if it's an ARN
