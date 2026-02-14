@@ -317,8 +317,6 @@ jobs:
           
           echo "✅ Drift report JSON generated at /tmp/drift_report.json"
 
-          echo "✅ Drift report JSON generated at $REPORT_FILE ($CHANGE_COUNT changes)"
-
       - name: Send Telegram Notification
         if: steps.plan.outputs.drift_detected == 'true'
         continue-on-error: true

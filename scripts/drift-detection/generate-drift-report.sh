@@ -33,7 +33,7 @@ while IFS='|' read -r address action resource_type identifier actor_name actor_a
     [ -z "$address" ] && continue
     
     # Extract resource name from address (last segment after final dot)
-    resource_name=$(echo "$address" | grep -oE '[^.]+$' | tr -d '[]"')
+    resource_name=$(echo "$address" | awk -F'.' '{print $NF}' | tr -d '[]"')
     
     # Normalize resource_type if it's "unknown"
     if [ -z "$resource_type" ] || [ "$resource_type" = "unknown" ]; then

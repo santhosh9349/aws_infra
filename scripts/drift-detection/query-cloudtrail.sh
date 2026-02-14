@@ -16,7 +16,7 @@ if [ ! -f "$INPUT_FILE" ]; then
     exit 1
 fi
 
-# Start date: 7 days ago (CloudTrail practical limit for recent changes)
+# Start date: 7 days ago (chosen lookback window - CloudTrail retains up to 90 days)
 START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
 echo "Querying CloudTrail for change attribution..."
