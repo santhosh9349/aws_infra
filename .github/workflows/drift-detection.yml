@@ -145,13 +145,13 @@ jobs:
           echo "Plan Summary: $create_count creates, $update_count updates, $delete_count deletes, $replace_count replacements."
 
       - name: Extract Drifted Resource ARNs
-        id: extract_ids
+        id: extract_arns
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          echo "=== Step 1: Extracting resource ARNs for CloudTrail attribution ==="
+          echo "=== Step 1: Extracting resource ARNs ONLY for CloudTrail attribution ==="
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
-          RESOURCE_FILE="/tmp/resource_ids.txt"
+          RESOURCE_FILE="/tmp/resource_arns.txt"
           > "$RESOURCE_FILE"
 
           # Helper function: Check if a string is an AWS ARN
@@ -199,51 +199,28 @@ jobs:
             exit 0
           fi
 
-          # --- Step 1b: Extract ARNs/IDs from "Refreshing state..." lines in plan output ---
-          # These lines appear during the refresh phase and contain the actual resource IDs
+          # --- Step 1b: Extract ARNs from "Refreshing state..." lines in plan output ---
+          # These lines appear during the refresh phase and contain the actual resource identifiers
           # Format: module.vpc["dev"].aws_vpc.this: Refreshing state... [id=vpc-xxx]
+          # We only store if the ID is an ARN
           echo ""
-          echo "Parsing plan output for 'Refreshing state' IDs/ARNs..."
-          declare -A REFRESH_IDS
+          echo "Parsing plan output for 'Refreshing state' ARNs..."
           declare -A REFRESH_ARNS
           while IFS= read -r line; do
             addr=$(echo "$line" | sed -E 's/^([^:]+): Refreshing state.*/\1/')
             rid=$(echo "$line" | sed -E 's/.*\[id=([^\]]+)\].*/\1/')
             if [ -n "$addr" ] && [ -n "$rid" ]; then
-              REFRESH_IDS["$addr"]="$rid"
-              # If the ID looks like an ARN (starts with arn:), store it as ARN too
+              # Only store if the ID is an ARN
               if is_arn "$rid"; then
                 REFRESH_ARNS["$addr"]="$rid"
                 echo "  📋 Refresh ARN: $addr → $rid"
-              else
-                echo "  📋 Refresh ID: $addr → $rid"
               fi
             fi
           done < <(grep 'Refreshing state\.\.\. \[id=' "$PLAN_FILE" 2>/dev/null || true)
-          echo "Found ${#REFRESH_IDS[@]} IDs (${#REFRESH_ARNS[@]} ARNs) from refresh lines"
+          echo "Found ${#REFRESH_ARNS[@]} ARNs from refresh lines"
 
-          # --- Step 1c: Extract resource names from plan output for "will be created" ---
-          # For resources being created (previously deleted), extract the "name" attribute
-          # from the plan block as a fallback identifier for CloudTrail lookup
-          echo ""
-          echo "Extracting resource names from plan output for 'will be created' resources..."
-          declare -A RESOURCE_NAMES
-          current_addr=""
-          while IFS= read -r line; do
-            # Match resource header: # module.xxx.aws_yyy.zzz will be created
-            if echo "$line" | grep -qE '^\s+#\s+.+\s+(will be|must be|has changed)'; then
-              current_addr=$(echo "$line" | sed -E 's/^\s+#\s(\S+)\s+(will be|must be|has changed).*/\1/')
-            fi
-            # Match name attribute: + name = "some-name"
-            if [ -n "$current_addr" ] && echo "$line" | grep -qE '^\s+\+\s+name\s+=\s+"[^"]+"'; then
-              rname=$(echo "$line" | sed -E 's/.*name\s+=\s+"([^"]+)".*/\1/')
-              if [ -n "$rname" ]; then
-                RESOURCE_NAMES["$current_addr"]="$rname"
-                current_addr=""
-              fi
-            fi
-          done < "$PLAN_FILE"
-          echo "Found ${#RESOURCE_NAMES[@]} resource names from plan attributes"
+          # --- Step 1c: Remove resource name extraction - not needed for ARN-only approach ---
+          # (This section is removed as we only extract ARNs)
 
           # --- Step 1d: Pull state from Terraform Cloud ---
           echo ""
@@ -263,13 +240,12 @@ jobs:
           jq -r '.resources[] | (if .module then .module + "." else "" end) + .type + "." + .name' /tmp/state_raw.json 2>/dev/null | head -40
           echo "--- END DEBUG ---"
 
-          # --- Step 1e: For each changed address, find its ARN/ID using all sources ---
+          # --- Step 1e: For each changed address, find its ARN using all sources ---
           while read -r address; do
             [ -z "$address" ] && continue
             echo ""
-            echo "Looking up ARN/ID for: $address"
+            echo "Looking up ARN for: $address"
 
-            id=""
             arn=""
 
             # Priority 1: Check refresh line ARNs (most reliable - directly from plan output)
@@ -278,27 +254,14 @@ jobs:
               echo "  ✅ Found ARN (from refresh line): $arn"
             fi
 
-            # Priority 2: Check refresh line IDs if no ARN yet
-            if [ -z "$arn" ] && [ -n "${REFRESH_IDS[$address]+x}" ]; then
-              id="${REFRESH_IDS[$address]}"
-              # Check if this ID is actually an ARN
-              if is_arn "$id"; then
-                arn="$id"
-                echo "  ✅ Found ARN (from refresh ID): $arn"
-              else
-                echo "  ✅ Found ID (from refresh line): $id"
-              fi
-            fi
-
-            # Priority 3: State JSON lookup - prefer ARN over ID
-            # Check multiple possible ARN field names: arn, policy_arn, or any *_arn field
+            # Priority 2: State JSON lookup - check multiple possible ARN field names
             if [ -z "$arn" ]; then
               arn=$(jq -r --arg addr "$address" '
                 .resources[] |
                 select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
                 .instances[0].attributes |
-                # Try standard .arn first, then policy_arn, then any field ending in _arn
-                (.arn // .policy_arn // (to_entries[] | select(.key | endswith("_arn")) | .value) // empty) |
+                # Try standard .arn first, then policy_arn, then any field with pattern word(2+)_arn
+                (.arn // .policy_arn // (to_entries[] | select(.key | test("^[a-z]{2,}_arn$")) | .value) // empty) |
                 select(. != null and . != "")
               ' /tmp/state_raw.json 2>/dev/null | head -1) || true
               
@@ -315,30 +278,8 @@ jobs:
               fi
             fi
 
-            # Priority 4: State JSON lookup for ID if no ARN
-            if [ -z "$id" ] && [ -z "$arn" ]; then
-              id=$(jq -r --arg addr "$address" '
-                .resources[] |
-                select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
-                .instances[0].attributes.id // empty
-              ' /tmp/state_raw.json 2>/dev/null) || true
-              
-              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                # Check if the ID is actually an ARN
-                if is_arn "$id"; then
-                  arn="$id"
-                  id=""
-                  echo "  ✅ Found ARN (from state JSON id field): $arn"
-                else
-                  echo "  ✅ Found ID (from state JSON): $id"
-                fi
-              else
-                id=""
-              fi
-            fi
-
-            # Priority 5: State JSON lookup handling for_each resources with index_key
-            if [ -z "$id" ] && [ -z "$arn" ]; then
+            # Priority 3: State JSON lookup handling for_each resources with index_key
+            if [ -z "$arn" ]; then
               result=$(jq -r --arg addr "$address" '
                 .resources[] |
                 . as $res |
@@ -349,77 +290,61 @@ jobs:
                   (if .index_key then "[\"" + (.index_key | tostring) + "\"]" else "" end)
                 ) as $full_addr |
                 select($full_addr == $addr) |
-                (.attributes.arn // .attributes.id // empty)
-              ' /tmp/state_raw.json 2>/dev/null) || true
+                .attributes |
+                # Try standard .arn first, then policy_arn, then any field with pattern word(2+)_arn
+                (.arn // .policy_arn // (to_entries[] | select(.key | test("^[a-z]{2,}_arn$")) | .value) // empty) |
+                select(. != null and . != "")
+              ' /tmp/state_raw.json 2>/dev/null | head -1) || true
 
               if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "" ]; then
                 if is_arn "$result"; then
                   arn="$result"
                   echo "  ✅ Found ARN (from state JSON with index_key): $arn"
-                else
-                  id="$result"
-                  echo "  ✅ Found ID (from state JSON with index_key): $id"
                 fi
               fi
             fi
 
-            # Priority 6: terraform state show fallback
-            if [ -z "$id" ] && [ -z "$arn" ]; then
-              # First try to get ARN
+            # Priority 4: terraform state show fallback
+            if [ -z "$arn" ]; then
+              # Try to get ARN field (try multiple ARN field names - requiring at least 2 chars before _arn)
               arn=$(terraform state show -no-color "$address" 2>/dev/null \
-                | grep -E '^\s+arn\s+=' | head -1 \
+                | grep -E '^\s+(arn|policy_arn|[a-z]{2,}_arn)\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
 
               if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
-                echo "  ✅ Found ARN (from terraform state show): $arn"
-              else
-                # Try to get ID as fallback
-                id=$(terraform state show -no-color "$address" 2>/dev/null \
-                  | grep -E '^\s+id\s+=' | head -1 \
-                  | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
-
-                if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                  echo "  ✅ Found ID (from terraform state show): $id"
+                if is_arn "$arn"; then
+                  echo "  ✅ Found ARN (from terraform state show): $arn"
                 else
-                  id=""
+                  arn=""
                 fi
+              else
+                arn=""
               fi
             fi
 
-            # Priority 7: Use resource name from plan output as fallback identifier
-            if [ -z "$id" ] && [ -z "$arn" ] && [ -n "${RESOURCE_NAMES[$address]+x}" ]; then
-              id="${RESOURCE_NAMES[$address]}"
-              echo "  ℹ️ Using resource name as identifier: $id"
-            fi
-
-            # Store ARN if found, otherwise store ID
+            # Store ARN if found
             if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
-              echo "$address|arn|$arn" >> "$RESOURCE_FILE"
+              echo "$address|$arn" >> "$RESOURCE_FILE"
               echo "  ✅ EXTRACTED ARN: $arn"
-            elif [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-              echo "$address|id|$id" >> "$RESOURCE_FILE"
-              echo "  ✅ EXTRACTED ID: $id"
             else
-              echo "  ❌ Could not resolve ARN or ID for $address"
+              echo "  ❌ Could not resolve ARN for $address"
             fi
           done < /tmp/changed_addresses.txt
 
           echo ""
-          echo "=== Resource ARN/ID extraction complete ==="
-          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
-          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null | head -1)
-          # Ensure variables are valid integers (default to 0 if empty)
-          ID_COUNT=${ID_COUNT:-0}
+          echo "=== Resource ARN extraction complete ==="
+          ARN_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
+          # Ensure variable is valid integer (default to 0 if empty)
           ARN_COUNT=${ARN_COUNT:-0}
-          echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
+          echo "Resources resolved: $ARN_COUNT / $ADDR_COUNT (ARNs only)"
           cat "$RESOURCE_FILE"
 
       - name: Query CloudTrail for Attribution
         id: cloudtrail
         if: steps.plan.outputs.exit_code == '2'
         run: |
-          echo "=== Step 2: Querying CloudTrail for actor attribution ==="
-          RESOURCE_FILE="/tmp/resource_ids.txt"
+          echo "=== Step 2: Querying CloudTrail for actor attribution using ARNs ==="
+          RESOURCE_FILE="/tmp/resource_arns.txt"
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           ATTRIBUTION_FILE="/tmp/attribution_table.md"
           ADDRESSES_FILE="/tmp/changed_addresses.txt"
@@ -486,76 +411,25 @@ jobs:
           MISS_COUNT=0
           START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
-          # Process resources that have ARNs/IDs resolved
+          # Process resources that have ARNs resolved
           if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
-            while IFS='|' read -r address id_type resource_identifier; do
-               if [ -z "$resource_identifier" ] || [ "$resource_identifier" == "null" ]; then
-                  echo "| \`$address\` | - | - | *(ARN/ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
+            while IFS='|' read -r address resource_arn; do
+               if [ -z "$resource_arn" ] || [ "$resource_arn" == "null" ]; then
+                  echo "| \`$address\` | - | - | *(ARN not resolved)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                   continue
                fi
 
-               echo "Querying CloudTrail for: $resource_identifier ($address, type: $id_type)..."
+               echo "Querying CloudTrail for ARN: $resource_arn ($address)..."
                
-               # CloudTrail lookup-events ResourceName attribute:
-               # Based on AWS best practices and testing, ResourceName typically expects AWS resource 
-               # IDs (e.g., vpc-xxx, subnet-xxx, i-xxx) rather than full ARNs for most reliable results.
-               # Reference: https://docs.aws.amazon.com/cli/latest/reference/cloudtrail/lookup-events.html
-               # For some services, it may also accept ARNs, but resource IDs are more reliable.
-               
-               # Extract resource ID from ARN if we have an ARN
-               query_value="$resource_identifier"
-               if [ "$id_type" = "arn" ]; then
-                 # Try to extract resource ID from ARN
-                 # ARN formats vary by service:
-                 # - arn:partition:service:region:account:resource-type/resource-id (e.g., EC2: vpc/vpc-xxx)
-                 # - arn:partition:service:region:account:resource-type:resource-id (e.g., IAM: role:role-name)
-                 # - arn:partition:service:region:account:resource-type/path/resource-id (e.g., IAM: role/path/role-name)
-                 # - arn:partition:s3:::bucket-name (S3 buckets)
-                 
-                 # For CloudTrail ResourceName, we typically want the actual resource ID
-                 # For most services (VPC, EC2, Subnet), this is the last segment after : or /
-                 # Extract using awk to get the last segment after splitting on both : and /
-                 resource_id=$(echo "$resource_identifier" | awk -F'[/:]' '{print $NF}')
-                 
-                 if [ -n "$resource_id" ] && [ "$resource_id" != "$resource_identifier" ]; then
-                   echo "  Extracted resource ID from ARN: $resource_id"
-                   # Try query with resource ID first
-                   echo "  Querying CloudTrail with resource ID: $resource_id"
-                   event=$(aws cloudtrail lookup-events \
-                     --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_id" \
-                     --start-time "$START_TIME" \
-                     --max-results 1 \
-                     --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-                   
-                   # If no result, try with full ARN as fallback
-                   if [ -z "$event" ] || [ "$event" = "None" ] || [ "$event" = "null" ]; then
-                     echo "  No event found with resource ID, trying with full ARN: $resource_identifier"
-                     event=$(aws cloudtrail lookup-events \
-                       --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                       --start-time "$START_TIME" \
-                       --max-results 1 \
-                       --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-                   fi
-                 else
-                   # Couldn't extract ID from ARN, use ARN directly
-                   echo "  Querying CloudTrail with ARN: $resource_identifier"
-                   event=$(aws cloudtrail lookup-events \
-                     --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                     --start-time "$START_TIME" \
-                     --max-results 1 \
-                     --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-                 fi
-               else
-                 # For IDs, use ResourceName attribute directly
-                 # This should be an AWS resource ID (vpc-xxx, subnet-xxx, etc.), not a Terraform name
-                 echo "  Querying CloudTrail with resource ID: $resource_identifier"
-                 event=$(aws cloudtrail lookup-events \
-                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                   --start-time "$START_TIME" \
-                   --max-results 1 \
-                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-               fi
+               # CloudTrail lookup-events with ARN
+               # Use the ARN directly as the ResourceName attribute
+               echo "  Querying CloudTrail with ARN: $resource_arn"
+               event=$(aws cloudtrail lookup-events \
+                 --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_arn" \
+                 --start-time "$START_TIME" \
+                 --max-results 1 \
+                 --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
                
                if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
                   extract_actor "$event"
@@ -567,7 +441,7 @@ jobs:
                   echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
                   FOUND_COUNT=$((FOUND_COUNT + 1))
                else
-                  echo "  ❌ No CloudTrail event found for $resource_identifier"
+                  echo "  ❌ No CloudTrail event found for $resource_arn"
                   echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                fi
@@ -576,20 +450,20 @@ jobs:
             done < "$RESOURCE_FILE"
           fi
 
-          # For resources with no ARNs/IDs at all, try CloudTrail event name lookup
+          # For resources with no ARNs at all, try CloudTrail event name lookup
           # This handles "will be created" drift where resources were deleted from AWS
           if [ -f "$ADDRESSES_FILE" ]; then
-            # Build set of addresses that already have ARNs/IDs
-            declare -A HAS_ID
+            # Build set of addresses that already have ARNs
+            declare -A HAS_ARN
             if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
-              while IFS='|' read -r addr id_type resource_identifier; do
-                HAS_ID["$addr"]=1
+              while IFS='|' read -r addr resource_arn; do
+                HAS_ARN["$addr"]=1
               done < "$RESOURCE_FILE"
             fi
 
             while read -r address; do
               [ -z "$address" ] && continue
-              [ -n "${HAS_ID[$address]+x}" ] && continue
+              [ -n "${HAS_ARN[$address]+x}" ] && continue
 
               # Extract resource type from address (e.g., module.xxx.aws_subnet.this → aws_subnet)
               tf_type=$(echo "$address" | grep -oE 'aws_[a-z0-9_]+' | tail -1)

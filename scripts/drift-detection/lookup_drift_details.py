@@ -20,16 +20,13 @@ def run_command(command: List[str]) -> Optional[str]:
         logger.warning(f"Command failed: {' '.join(command)}\nError: {e.stderr}")
         return None
 
-def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
-    """Get resource ID from Terraform state."""
-    logger.info(f"Looking up state for {address}...")
+def get_resource_arn_from_state(address: str, working_dir: str) -> Optional[str]:
+    """Get resource ARN from Terraform state (ARN only, no IDs)."""
+    logger.info(f"Looking up ARN for {address}...")
     
     cmd = ["terraform", "state", "show", "-no-color", address]
     
     try:
-        # Debug: ensure we are where we think we are
-        # logger.info(f"CWD: {os.getcwd()}")
-        
         # WE TRUST os.chdir() from main. cwd=None uses current process directory.
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=None)
         
@@ -37,8 +34,6 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
             # Handle standard Terraform errors gracefully
             if "No state file was found" in result.stderr:
                 logger.warning(f"State lookup failed: No state file found in {os.getcwd()}")
-                # Optional: debug listdir
-                # logger.info(f"Dir contents: {os.listdir('.')}")
                 return None
             elif "Resource instance not found" in result.stderr:
                 logger.info(f"Resource {address} not found in state (New resource).")
@@ -53,31 +48,34 @@ def get_resource_id_from_state(address: str, working_dir: str) -> Optional[str]:
         return None
     
     if output:
-        # Look for "id = ..." line
-        m = re.search(r'\n\s+id\s+=\s+"([^"]+)"', output)
+        # Look for "arn = ..." line (ARN only)
+        m = re.search(r'\n\s+arn\s+=\s+"([^"]+)"', output)
         if m:
             return m.group(1)
-            
-        # Fallback: sometimes attributes have different names, but 'id' is standard for resources
-        # If simple regex fails, we can try to find the specific AWS resource ID pattern if known,
-        # but 'id' attribute is the most reliable cross-resource key in state show output.
         
+        # Try alternative ARN field names like policy_arn, role_arn, etc.
+        # Match field names that have at least two characters before _arn
+        m = re.search(r'\n\s+[a-z]{2,}_arn\s+=\s+"([^"]+)"', output)
+        if m:
+            arn_candidate = m.group(1)
+            # Validate it's actually an ARN format
+            if arn_candidate.startswith('arn:'):
+                return arn_candidate
+            
     return None
 
-def lookup_cloudtrail_event(resource_id: str) -> Dict[str, str]:
-    """Query CloudTrail for events related to the resource ID."""
-    logger.info(f"Querying CloudTrail for resource ID: {resource_id}")
+def lookup_cloudtrail_event(resource_arn: str) -> Dict[str, str]:
+    """Query CloudTrail for events related to the resource ARN."""
+    logger.info(f"Querying CloudTrail for resource ARN: {resource_arn}")
     
     # Calculate start time (7 days ago)
-    # Python equivalent of date -d '7 days ago'
-    # But for simplicity, we rely on aws cli default or simple string?
-    # AWS CLI expects ISO timestamp or duration. using subprocess/date might be easier or just python datetime.
     import datetime
     start_time = (datetime.datetime.utcnow() - datetime.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
     
+    # Query CloudTrail using ARN directly
     cmd = [
         "aws", "cloudtrail", "lookup-events",
-        "--lookup-attributes", f"AttributeKey=ResourceName,AttributeValue={resource_id}",
+        "--lookup-attributes", f"AttributeKey=ResourceName,AttributeValue={resource_arn}",
         "--start-time", start_time,
         "--max-results", "1",
         "--query", "Events[0].CloudTrailEvent",
@@ -120,10 +118,10 @@ def main():
     parser.add_argument("--terraform-dir", required=True, help="Terraform working directory")
     args = parser.parse_args()
 
-    # 1. Parse Plan File for Addresses and Refresh IDs
+    # Parse Plan File for Addresses and Refresh ARNs
     addresses = []
     drift_data = {} # Map address -> action
-    refresh_ids = {} # Map address -> ID
+    refresh_arns = {} # Map address -> ARN
     
     try:
         with open(args.plan_file, "r") as f:
@@ -137,11 +135,13 @@ def main():
             for addr, action in matches:
                 drift_data[addr] = action
             
-            # Extract IDs from "Refreshing state..." lines
-            # Address may contain brackets/quotes for for_each resources
+            # Extract ARNs from "Refreshing state..." lines
+            # Only store if the ID is an ARN
             refresh_matches = re.findall(r'^([\w\.\-\"\[\]]+): Refreshing state\.\.\. \[id=([^\]]+)\]', content, re.MULTILINE)
             for addr, rid in refresh_matches:
-                refresh_ids[addr] = rid
+                # Only store if it's an ARN
+                if rid.startswith('arn:'):
+                    refresh_arns[addr] = rid
                 
     except Exception as e:
         logger.error(f"Error reading plan file: {e}")
@@ -201,27 +201,27 @@ def main():
             # We strictly prioritize EC2 or other major resources.
             is_priority = any(pt in addr for pt in PRIORITY_TYPES)
             
-            # Use ID from refresh logs if available (Reliable for drift)
-            res_id = refresh_ids.get(addr)
+            # Use ARN from refresh logs if available (Reliable for drift)
+            res_arn = refresh_arns.get(addr)
             
             # Fallback to state lookup - only if resource exists in state
-            if not res_id and addr in state_resource_set:
+            if not res_arn and addr in state_resource_set:
                # We are currently IN the directory, so working_dir="." is correct.
-               res_id = get_resource_id_from_state(addr, ".")
-            elif not res_id:
+               res_arn = get_resource_arn_from_state(addr, ".")
+            elif not res_arn:
                logger.info(f"Resource {addr} not in state (Action: {action})")
             
             info = {
                 "address": addr,
-                "id": res_id or "Unknown",
+                "arn": res_arn or "Unknown",
                 "user": "-",
                 "time": "-",
                 "action": action,
                 "priority": is_priority
             }
             
-            if res_id:
-                ct_data = lookup_cloudtrail_event(res_id)
+            if res_arn:
+                ct_data = lookup_cloudtrail_event(res_arn)
                 info.update(ct_data)
         
             results.append(info)
@@ -234,8 +234,8 @@ def main():
 
     # Output Markdown Table
     print("\n### Drift Attribution Analysis")
-    print("| Resource | ID | Actor | Action | Time |")
-    print("|----------|----|-------|--------|------|")
+    print("| Resource | ARN | Actor | Action | Time |")
+    print("|----------|-----|-------|--------|------|")
     for r in results:
         # Only show priority items OR items where we found an actor
         show_row = r['priority'] or r['user'] != "-"
@@ -243,7 +243,7 @@ def main():
         if show_row:
             # Highlight priority
             display_addr = f"**{r['address']}**" if r['priority'] else f"`{r['address']}`"
-            print(f"| {display_addr} | `{r['id']}` | **{r['user']}** | {r['action']} | {r['time']} |")
+            print(f"| {display_addr} | `{r['arn']}` | **{r['user']}** | {r['action']} | {r['time']} |")
             
     if not results:
         print("No drift attribution available.")
