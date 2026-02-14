@@ -309,6 +309,9 @@ def parse_drift_report(report_path: str) -> DriftDetectionEvent:
                 action=ActionType(change_data.get("action", "update")),
                 before=change_data.get("before"),
                 after=change_data.get("after"),
+                actor_name=change_data.get("actor_name"),
+                actor_arn=change_data.get("actor_arn"),
+                event_time=change_data.get("event_time"),
             )
         )
     
