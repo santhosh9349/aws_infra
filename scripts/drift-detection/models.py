@@ -36,16 +36,31 @@ class ResourceChange(BaseModel):
     before: Optional[dict] = Field(None, description="Attribute values before change")
     after: Optional[dict] = Field(None, description="Attribute values after change")
     
+    # CloudTrail attribution fields
+    actor_name: Optional[str] = Field(None, description="IAM user or role that made the change")
+    actor_arn: Optional[str] = Field(None, description="ARN of the actor (IAM user/role/service)")
+    event_time: Optional[str] = Field(None, description="Timestamp when the change was made")
+    
     @property
     def display_name(self) -> str:
         """Human-readable resource identifier"""
         return f"{self.resource_type}.{self.resource_name}"
     
     @property
+    def has_attribution(self) -> bool:
+        """Check if CloudTrail attribution is available"""
+        return self.actor_name is not None and self.actor_name not in ["*(unavailable)*", "-", ""]
+    
+    @property
     def change_summary(self) -> List[str]:
         """List of changed attributes with before/after values"""
         if not self.before or not self.after:
-            return [f"Action: {self.action.value}"]
+            summary = [f"Action: {self.action.value}"]
+            if self.has_attribution:
+                summary.append(f"Actor: {self.actor_name}")
+                if self.event_time and self.event_time != "-":
+                    summary.append(f"Time: {self.event_time}")
+            return summary
         
         changes = []
         all_keys = set(self.before.keys()) | set(self.after.keys())
@@ -54,6 +69,12 @@ class ResourceChange(BaseModel):
             after_val = self.after.get(key, "[not set]")
             if before_val != after_val:
                 changes.append(f"{key}: {before_val} → {after_val}")
+        
+        if self.has_attribution:
+            changes.append(f"Actor: {self.actor_name}")
+            if self.event_time and self.event_time != "-":
+                changes.append(f"Time: {self.event_time}")
+        
         return changes if changes else [f"Action: {self.action.value}"]
 
 
