@@ -149,7 +149,8 @@ jobs:
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          echo "=== Step 1: Extracting resource ARNs for CloudTrail attribution ==="
+          echo "=== Step 1: Extracting resource ARNs for CloudTrail attribution (ARN-only mode) ==="
+          echo "NOTE: Only ARNs will be extracted. Resources without ARNs will be skipped."
           PLAN_FILE="${{ github.workspace }}/plan_output.txt"
           RESOURCE_FILE="/tmp/resource_ids.txt"
           > "$RESOURCE_FILE"
@@ -263,13 +264,13 @@ jobs:
           jq -r '.resources[] | (if .module then .module + "." else "" end) + .type + "." + .name' /tmp/state_raw.json 2>/dev/null | head -40
           echo "--- END DEBUG ---"
 
-          # --- Step 1e: For each changed address, find its ARN/ID using all sources ---
+          # --- Step 1e: For each changed address, find its ARN using all sources ---
+          # NOTE: Only ARNs are extracted. Resources without ARNs will be skipped.
           while read -r address; do
             [ -z "$address" ] && continue
             echo ""
-            echo "Looking up ARN/ID for: $address"
+            echo "Looking up ARN for: $address"
 
-            id=""
             arn=""
 
             # Priority 1: Check refresh line ARNs (most reliable - directly from plan output)
@@ -278,19 +279,17 @@ jobs:
               echo "  ✅ Found ARN (from refresh line): $arn"
             fi
 
-            # Priority 2: Check refresh line IDs if no ARN yet
+            # Priority 2: Check refresh line IDs - but only if they are ARNs
             if [ -z "$arn" ] && [ -n "${REFRESH_IDS[$address]+x}" ]; then
-              id="${REFRESH_IDS[$address]}"
+              potential_arn="${REFRESH_IDS[$address]}"
               # Check if this ID is actually an ARN
-              if is_arn "$id"; then
-                arn="$id"
+              if is_arn "$potential_arn"; then
+                arn="$potential_arn"
                 echo "  ✅ Found ARN (from refresh ID): $arn"
-              else
-                echo "  ✅ Found ID (from refresh line): $id"
               fi
             fi
 
-            # Priority 3: State JSON lookup - prefer ARN over ID
+            # Priority 3: State JSON lookup - check ARN fields only
             # Check multiple possible ARN field names: arn, policy_arn, or any *_arn field
             if [ -z "$arn" ]; then
               arn=$(jq -r --arg addr "$address" '
@@ -315,30 +314,25 @@ jobs:
               fi
             fi
 
-            # Priority 4: State JSON lookup for ID if no ARN
-            if [ -z "$id" ] && [ -z "$arn" ]; then
-              id=$(jq -r --arg addr "$address" '
+            # Priority 4: State JSON id field - but only if it's an ARN
+            if [ -z "$arn" ]; then
+              potential_arn=$(jq -r --arg addr "$address" '
                 .resources[] |
                 select(((if .module then .module + "." else "" end) + .type + "." + .name) == $addr) |
                 .instances[0].attributes.id // empty
               ' /tmp/state_raw.json 2>/dev/null) || true
               
-              if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
+              if [ -n "$potential_arn" ] && [ "$potential_arn" != "null" ] && [ "$potential_arn" != "" ]; then
                 # Check if the ID is actually an ARN
-                if is_arn "$id"; then
-                  arn="$id"
-                  id=""
+                if is_arn "$potential_arn"; then
+                  arn="$potential_arn"
                   echo "  ✅ Found ARN (from state JSON id field): $arn"
-                else
-                  echo "  ✅ Found ID (from state JSON): $id"
                 fi
-              else
-                id=""
               fi
             fi
 
             # Priority 5: State JSON lookup handling for_each resources with index_key
-            if [ -z "$id" ] && [ -z "$arn" ]; then
+            if [ -z "$arn" ]; then
               result=$(jq -r --arg addr "$address" '
                 .resources[] |
                 . as $res |
@@ -356,16 +350,12 @@ jobs:
                 if is_arn "$result"; then
                   arn="$result"
                   echo "  ✅ Found ARN (from state JSON with index_key): $arn"
-                else
-                  id="$result"
-                  echo "  ✅ Found ID (from state JSON with index_key): $id"
                 fi
               fi
             fi
 
-            # Priority 6: terraform state show fallback
-            if [ -z "$id" ] && [ -z "$arn" ]; then
-              # First try to get ARN
+            # Priority 6: terraform state show fallback - ARN only
+            if [ -z "$arn" ]; then
               arn=$(terraform state show -no-color "$address" 2>/dev/null \
                 | grep -E '^\s+arn\s+=' | head -1 \
                 | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
@@ -373,49 +363,29 @@ jobs:
               if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
                 echo "  ✅ Found ARN (from terraform state show): $arn"
               else
-                # Try to get ID as fallback
-                id=$(terraform state show -no-color "$address" 2>/dev/null \
-                  | grep -E '^\s+id\s+=' | head -1 \
-                  | sed 's/.*=\s*//' | tr -d '"' | xargs) || true
-
-                if [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-                  echo "  ✅ Found ID (from terraform state show): $id"
-                else
-                  id=""
-                fi
+                arn=""
               fi
             fi
 
-            # Priority 7: Use resource name from plan output as fallback identifier
-            if [ -z "$id" ] && [ -z "$arn" ] && [ -n "${RESOURCE_NAMES[$address]+x}" ]; then
-              id="${RESOURCE_NAMES[$address]}"
-              echo "  ℹ️ Using resource name as identifier: $id"
-            fi
-
-            # Store ARN if found, otherwise store ID
+            # Store ARN if found, skip if not found
             if [ -n "$arn" ] && [ "$arn" != "null" ] && [ "$arn" != "" ]; then
               echo "$address|arn|$arn" >> "$RESOURCE_FILE"
               echo "  ✅ Extracted ARN: $arn"
-            elif [ -n "$id" ] && [ "$id" != "null" ] && [ "$id" != "" ]; then
-              echo "$address|id|$id" >> "$RESOURCE_FILE"
-              echo "  ✅ Extracted ID: $id"
             else
-              echo "  ❌ Could not resolve ARN or ID for $address"
+              echo "  ⚠️ No ARN found for $address - skipping (ARN-only mode)"
             fi
           done < /tmp/changed_addresses.txt
 
           echo ""
-          echo "=== Resource ARN/ID extraction complete ==="
-          ID_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
-          ARN_COUNT=$(grep -c '|arn|' "$RESOURCE_FILE" 2>/dev/null | head -1)
+          echo "=== Resource ARN extraction complete (ARN-only mode) ==="
+          ARN_COUNT=$(wc -l < "$RESOURCE_FILE" | tr -d ' ' | head -1)
           # Ensure variables are valid integers (default to 0 if empty)
-          ID_COUNT=${ID_COUNT:-0}
           ARN_COUNT=${ARN_COUNT:-0}
-          echo "Resources resolved: $ID_COUNT / $ADDR_COUNT ($ARN_COUNT ARNs, $((ID_COUNT - ARN_COUNT)) IDs)"
+          echo "Resources with ARNs: $ARN_COUNT / $ADDR_COUNT"
           echo ""
-          echo "--- Extracted ARNs/IDs Summary ---"
+          echo "--- Extracted ARNs Summary ---"
           cat "$RESOURCE_FILE"
-          echo "--- End of Extracted ARNs/IDs ---"
+          echo "--- End of Extracted ARNs ---"
 
       - name: Query CloudTrail for Attribution
         id: cloudtrail
@@ -489,38 +459,34 @@ jobs:
           MISS_COUNT=0
           START_TIME=$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)
 
-          # Process resources that have ARNs/IDs resolved
+          # Process resources that have ARNs resolved (ARN-only mode)
           if [ -f "$RESOURCE_FILE" ] && [ -s "$RESOURCE_FILE" ]; then
             while IFS='|' read -r address id_type resource_identifier; do
                if [ -z "$resource_identifier" ] || [ "$resource_identifier" == "null" ]; then
-                  echo "| \`$address\` | - | - | *(ARN/ID not resolved)* | - |" >> "$ATTRIBUTION_FILE"
+                  echo "| \`$address\` | - | - | *(ARN not resolved)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                   continue
                fi
 
-               echo "Querying CloudTrail for: $resource_identifier ($address, type: $id_type)..."
-               
-               # CloudTrail lookup-events API supports ResourceName attribute for both ARNs and resource IDs
-               # Reference: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events-cli.html
-               # The ResourceName attribute accepts:
-               # - ARNs (preferred for global uniqueness)
-               # - Resource IDs (vpc-xxx, subnet-xxx, i-xxx, etc.)
-               # - For some services, resource names (but less reliable)
-               if [ "$id_type" = "arn" ]; then
-                 echo "  Using ARN in CloudTrail ResourceName query..."
-                 event=$(aws cloudtrail lookup-events \
-                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                   --start-time "$START_TIME" \
-                   --max-results 1 \
-                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
-               else
-                 echo "  Using resource ID in CloudTrail ResourceName query..."
-                 event=$(aws cloudtrail lookup-events \
-                   --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
-                   --start-time "$START_TIME" \
-                   --max-results 1 \
-                   --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
+               # ARN-only mode: Only query CloudTrail if we have an ARN
+               if [ "$id_type" != "arn" ]; then
+                 echo "⚠️ Skipping non-ARN identifier: $resource_identifier ($address, type: $id_type)"
+                 echo "| \`$address\` | - | - | *(Non-ARN identifier skipped)* | - |" >> "$ATTRIBUTION_FILE"
+                 MISS_COUNT=$((MISS_COUNT + 1))
+                 continue
                fi
+
+               echo "Querying CloudTrail for ARN: $resource_identifier ($address)..."
+               
+               # CloudTrail lookup-events API with ARN
+               # Reference: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/view-cloudtrail-events-cli.html
+               # Using ResourceName attribute with ARN for global uniqueness and reliable lookup
+               echo "  Using ARN in CloudTrail ResourceName query..."
+               event=$(aws cloudtrail lookup-events \
+                 --lookup-attributes AttributeKey=ResourceName,AttributeValue="$resource_identifier" \
+                 --start-time "$START_TIME" \
+                 --max-results 1 \
+                 --query 'Events[0].CloudTrailEvent' --output text 2>/dev/null) || true
                
                if [ -n "$event" ] && [ "$event" != "None" ] && [ "$event" != "null" ]; then
                   extract_actor "$event"
@@ -532,7 +498,7 @@ jobs:
                   echo "| \`$address\` | $eventName | **$actor_name** | \`$actor_id\` | $time |" >> "$ATTRIBUTION_FILE"
                   FOUND_COUNT=$((FOUND_COUNT + 1))
                else
-                  echo "  ❌ No CloudTrail event found for $resource_identifier"
+                  echo "  ❌ No CloudTrail event found for ARN: $resource_identifier"
                   echo "| \`$address\` | - | - | *(No CloudTrail event found)* | - |" >> "$ATTRIBUTION_FILE"
                   MISS_COUNT=$((MISS_COUNT + 1))
                fi
