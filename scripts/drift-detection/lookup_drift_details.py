@@ -53,8 +53,9 @@ def get_resource_arn_from_state(address: str, working_dir: str) -> Optional[str]
         if m:
             return m.group(1)
         
-        # Try alternative ARN field names like policy_arn, or any field ending in _arn
-        m = re.search(r'\n\s+\w*_?arn\s+=\s+"([^"]+)"', output)
+        # Try alternative ARN field names like policy_arn, role_arn, etc.
+        # Match field names that have at least one character before _arn
+        m = re.search(r'\n\s+\w+_arn\s+=\s+"([^"]+)"', output)
         if m:
             arn_candidate = m.group(1)
             # Validate it's actually an ARN format
