@@ -78,7 +78,8 @@ jobs:
           for attempt in $(seq 1 $MAX_RETRIES); do
             echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
             
-            # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
+            # Generate both human-readable and JSON outputs
+            # Text output for display
             terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
             EXIT_CODE=${PIPESTATUS[0]}
             
@@ -94,14 +95,23 @@ jobs:
               fi
             fi
             
+            # If plan succeeded or found drift, also generate JSON output
+            if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 2 ]; then
+              echo "Generating JSON plan output..."
+              terraform plan -json -detailed-exitcode -input=false 2>&1 > /tmp/plan_stream.jsonl || true
+            fi
+            
             # Process exit code (only reached if no lock error)
             break
           done
           
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           
-          # Save plan output for later use
+          # Save plan outputs for later use
           cp /tmp/plan_output.txt ${{ github.workspace }}/plan_output.txt
+          if [ -f /tmp/plan_stream.jsonl ]; then
+            cp /tmp/plan_stream.jsonl ${{ github.workspace }}/plan_stream.jsonl
+          fi
           
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ No drift detected - infrastructure matches Terraform state"
@@ -121,16 +131,15 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
-      - name: Generate Plan JSON
-        id: generate_json
+      - name: Parse Plan JSON Stream
+        id: parse_json
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          # Generate JSON representation of the plan from text output
+          # Parse native JSON stream from terraform plan -json
           bash ${{ github.workspace }}/scripts/drift-detection/generate-plan-json.sh \
-            ${{ github.workspace }}/plan_output.txt \
-            /tmp/plan.json \
-            $PWD
+            ${{ github.workspace }}/plan_stream.jsonl \
+            /tmp/plan.json
           
           echo "plan_json=/tmp/plan.json" >> $GITHUB_OUTPUT
 
