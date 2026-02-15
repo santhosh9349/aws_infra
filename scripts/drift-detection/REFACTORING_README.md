@@ -1,11 +1,131 @@
 # Drift Detection Refactoring - Implementation Details
 
 ## Overview
-This refactoring addresses the issue where the drift detection workflow failed to:
-1. Properly attribute manual deletions (which show as "creates" in Terraform plan)
-2. Pass CloudTrail actor information to Python data models and Telegram notifications
+This refactoring addresses multiple issues in the drift detection workflow:
+1. **Primary Fix**: Resolved JSON parsing crash in `generate-plan-json.sh` caused by invalid JSON passed to `jq --argjson`
+2. Properly attribute manual deletions (which show as "creates" in Terraform plan)
+3. Pass CloudTrail actor information to Python data models and Telegram notifications
 
-## Changes Made
+## Recent Changes (2026-02-15)
+
+### Critical Bug Fix: JSON Parsing Failure
+
+**Problem**: The drift detection workflow was failing with error:
+```
+jq: invalid JSON text passed to --argjson
+Process completed with exit code 2.
+```
+
+**Root Cause**: The `generate-plan-json.sh` script was:
+1. Parsing human-readable text output from `terraform plan`
+2. Attempting to extract resource state from Terraform state
+3. Passing potentially empty/invalid strings to `jq --argjson` which requires valid JSON
+
+**Solution**: Complete refactor to use native JSON output from Terraform:
+1. **Workflow Change**: Updated to run `terraform plan -json` which produces native JSONL stream
+2. **Script Rewrite**: `generate-plan-json.sh` now parses the JSONL stream directly
+3. **Validation**: All JSON values validated before passing to `jq --argjson`
+4. **Resilience**: Gracefully handles null/missing "before" states (create actions)
+
+### Updated Implementation
+
+#### `generate-plan-json.sh` (REFACTORED)
+**Purpose**: Parse native JSON stream from `terraform plan -json`
+
+**Key Changes**:
+- **Input**: Now accepts JSONL stream from `terraform plan -json` instead of text output
+- **No State Pulling**: Native JSON already contains all state information
+- **Robust Parsing**: Extracts `planned_change` events from JSONL stream
+- **Null Handling**: Properly handles `null` values for create/delete actions
+- **Validation**: Ensures all JSON values are valid before using `--argjson`
+
+**Process**:
+1. Read JSONL stream line by line
+2. Filter for `type="planned_change"` or `type="resource_drift"` messages
+3. Extract resource address, type, action, before/after states
+4. Validate JSON values (default to `null` if empty/invalid)
+5. Build structured JSON output compatible with `parse-terraform-plan.sh`
+
+**Example Input** (JSONL from `terraform plan -json`):
+```json
+{"@level":"info","type":"planned_change","change":{"resource":{"addr":"aws_vpc.main","resource_type":"aws_vpc"},"action":"update","before":{"id":"vpc-123"},"after":{"id":"vpc-123","tags":{"Env":"dev"}}}}
+{"@level":"info","type":"planned_change","change":{"resource":{"addr":"aws_subnet.public","resource_type":"aws_subnet"},"action":"create","before":null,"after":{"id":"subnet-456"}}}
+```
+
+**Example Output** (Structured JSON):
+```json
+{
+  "format_version": "1.0",
+  "terraform_version": "1.5.7",
+  "resource_changes": [
+    {
+      "address": "aws_vpc.main",
+      "type": "aws_vpc",
+      "change": {
+        "actions": ["update"],
+        "before": {"id": "vpc-123"},
+        "after": {"id": "vpc-123", "tags": {"Env": "dev"}}
+      }
+    },
+    {
+      "address": "aws_subnet.public",
+      "type": "aws_subnet",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {"id": "subnet-456"}
+      }
+    }
+  ]
+}
+```
+
+### Workflow Changes
+
+#### `.github/workflows/drift-detection.yml`
+
+**Terraform Plan Step** - Now generates both text and JSON output:
+```yaml
+- name: Terraform Plan (Drift Detection)
+  run: |
+    # Generate text output for display
+    terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
+    
+    # Generate JSON output for parsing
+    if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 2 ]; then
+      terraform plan -json -detailed-exitcode -input=false 2>&1 > /tmp/plan_stream.jsonl
+    fi
+```
+
+**Parse Plan JSON Stream Step** - Simplified to just parse native JSON:
+```yaml
+- name: Parse Plan JSON Stream
+  run: |
+    bash scripts/drift-detection/generate-plan-json.sh \
+      plan_stream.jsonl \
+      /tmp/plan.json
+```
+
+### Benefits of This Refactor
+
+1. **Reliability**: No more crashes from invalid JSON
+2. **Accuracy**: Native Terraform JSON contains complete, accurate data
+3. **Simplicity**: Removed complex text parsing and state pulling logic
+4. **Performance**: Faster - no need to pull state separately
+5. **Maintainability**: Cleaner code that's easier to understand and debug
+
+### Testing
+
+All edge cases tested and validated:
+
+✅ **Normal updates**: Resources with both before/after states  
+✅ **Create actions**: Resources with `null` before state (manual deletions)  
+✅ **Delete actions**: Resources with `null` after state  
+✅ **Empty plans**: No resource changes  
+✅ **Mixed JSONL**: Non-change messages filtered correctly  
+✅ **Invalid input**: Gracefully generates empty valid JSON structure
+
+## Changes Made (Previous Refactoring)
 
 ### 1. Script Refactoring
 
