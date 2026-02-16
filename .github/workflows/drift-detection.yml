@@ -153,10 +153,18 @@ jobs:
             /tmp/drift_resources.txt
           
           # Count changes by action type
-          create_count=$(grep -c '|create|' /tmp/drift_resources.txt 2>/dev/null || echo 0)
-          update_count=$(grep -c '|update|' /tmp/drift_resources.txt 2>/dev/null || echo 0)
-          delete_count=$(grep -c '|delete|' /tmp/drift_resources.txt 2>/dev/null || echo 0)
-          replace_count=$(grep -c '|replace|' /tmp/drift_resources.txt 2>/dev/null || echo 0)
+          # Use || true to swallow the exit code 1 without echoing a second zero
+          create_count=$(grep -c '|create|' /tmp/drift_resources.txt 2>/dev/null || true)
+          update_count=$(grep -c '|update|' /tmp/drift_resources.txt 2>/dev/null || true)
+          delete_count=$(grep -c '|delete|' /tmp/drift_resources.txt 2>/dev/null || true)
+          replace_count=$(grep -c '|replace|' /tmp/drift_resources.txt 2>/dev/null || true)
+          
+          # Provide a default of 0 in case the file was completely empty or missing
+          create_count=${create_count:-0}
+          update_count=${update_count:-0}
+          delete_count=${delete_count:-0}
+          replace_count=${replace_count:-0}
+          
           total_count=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
           
           echo "create_count=$create_count" >> $GITHUB_OUTPUT
