@@ -2,7 +2,7 @@ terraform {
   cloud {
     organization = "santhosh9349"
     workspaces {
-      name = "aws_infra"
+      name = "tf_dev"
     }
   }
 
