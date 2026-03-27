@@ -101,9 +101,7 @@ aws_infra/
 - **Mandatory tagging**: Every AWS resource MUST include the following tags:
   - `Environment` (dev/staging/prod)
   - `Project` ("AWS Infrastructure")
-  - `ManagedBy` ("Terraform")
   - `Owner` ("DevOps Team")
-  - `CostCenter` (environment name)
   - `VPC` (VPC name for VPC-specific resources)
 - **State management**: Never manage state locally - all state in Terraform Cloud
 - **Naming conventions**:
