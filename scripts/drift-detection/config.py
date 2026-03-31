@@ -9,7 +9,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from .models import NotificationConfig
+from models import NotificationConfig
 
 
 def load_config(env_file: Optional[str] = None) -> NotificationConfig:
@@ -39,12 +39,12 @@ def load_config(env_file: Optional[str] = None) -> NotificationConfig:
 def _from_env() -> NotificationConfig:
     """Load configuration from environment variables"""
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    channel_id = os.getenv("TELEGRAM_CHANNEL_ID") or os.getenv("TELEGRAM_CHAT_ID")
     
     if not bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN environment variable is required")
     if not channel_id:
-        raise ValueError("TELEGRAM_CHANNEL_ID environment variable is required")
+        raise ValueError("TELEGRAM_CHANNEL_ID or TELEGRAM_CHAT_ID environment variable is required")
     
     return NotificationConfig(
         bot_token=bot_token,

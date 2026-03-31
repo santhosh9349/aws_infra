@@ -35,7 +35,7 @@ except ImportError:
     logger.error("python-telegram-bot is not installed. Run: pip install python-telegram-bot==20.7")
     sys.exit(1)
 
-from .models import (
+from models import (
     DriftDetectionEvent,
     ResourceChange,
     ActionType,
@@ -44,9 +44,9 @@ from .models import (
     DeliveryStatus,
     NotificationConfig,
 )
-from .config import load_config
-from .message_formatter import format_drift_message, format_no_drift_message, split_message
-from .retry_handler import RetryHandler
+from config import load_config
+from message_formatter import format_drift_message, format_no_drift_message, split_message
+from retry_handler import RetryHandler
 
 
 def sanitize_for_logging(text: str, show_chars: int = 4) -> str:
@@ -309,6 +309,9 @@ def parse_drift_report(report_path: str) -> DriftDetectionEvent:
                 action=ActionType(change_data.get("action", "update")),
                 before=change_data.get("before"),
                 after=change_data.get("after"),
+                actor_name=change_data.get("actor_name"),
+                actor_arn=change_data.get("actor_arn"),
+                event_time=change_data.get("event_time"),
             )
         )
     

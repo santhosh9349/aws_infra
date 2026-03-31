@@ -1,16 +1,15 @@
 name: Terraform Drift Detection
 
 on:
-  schedule:
-    # Run at 8:00 AM UTC (9:00 AM BST during summer)
-    - cron: '0 8 * * *'
+  repository_dispatch:
+    types: [drift-check]
   
   workflow_dispatch:
     inputs:
       environment:
         description: 'Environment to check for drift'
         required: true
-        default: 'dev4'
+        default: 'dev'
         type: choice
         options:
           - dev
@@ -49,6 +48,20 @@ jobs:
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
           terraform_wrapper: false
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          cd scripts/drift-detection
+          if [ -f requirements.txt ]; then
+             pip install -r requirements.txt
+          else
+             echo "requirements.txt not found, skipping dependency installation"
+          fi
+
       - name: Terraform Init
         id: init
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
@@ -63,10 +76,11 @@ jobs:
           RETRY_DELAY=300  # 5 minutes
           
           for attempt in $(seq 1 $MAX_RETRIES); do
-            echo "🔄 Terraform plann attempt $attempt of $MAX_RETRIES"
+            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
             
-            # Note: Terraform Cloud doesn't support -out flag, so we just detect changes
-            terraform plan -detailed-exitcode -input=false 2>&1 | tee /tmp/plan_output.txt
+            # Generate both human-readable and JSON outputs
+            # Text output for display
+            terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
             EXIT_CODE=${PIPESTATUS[0]}
             
             # Check for state lock error
@@ -81,14 +95,23 @@ jobs:
               fi
             fi
             
+            # If plan succeeded or found drift, also generate JSON output
+            if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 2 ]; then
+              echo "Generating JSON plan output..."
+              terraform plan -json -detailed-exitcode -input=false 2>&1 > /tmp/plan_stream.jsonl || true
+            fi
+            
             # Process exit code (only reached if no lock error)
             break
           done
           
           echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
           
-          # Save plan output for later use
+          # Save plan outputs for later use
           cp /tmp/plan_output.txt ${{ github.workspace }}/plan_output.txt
+          if [ -f /tmp/plan_stream.jsonl ]; then
+            cp /tmp/plan_stream.jsonl ${{ github.workspace }}/plan_stream.jsonl
+          fi
           
           if [ $EXIT_CODE -eq 0 ]; then
             echo "✅ No drift detected - infrastructure matches Terraform state"
@@ -108,9 +131,10 @@ jobs:
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
 
-      - name: Parse drift from plan output
-        id: parse
-        if: steps.plan.outputs.drift_detected == 'true'
+      - name: Parse Plan JSON Stream
+        id: parse_json
+        if: steps.plan.outputs.exit_code == '2'
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
           # Parse the plan text output to identify changed resources
           echo "Parsing drift from plan output..."
@@ -140,26 +164,54 @@ jobs:
           DELETE_COUNT=$((DELETE_COUNT + 0))
           REPLACE_COUNT=$((REPLACE_COUNT + 0))
           
-          echo "create_count=${CREATE_COUNT}" >> $GITHUB_OUTPUT
-          echo "update_count=${UPDATE_COUNT}" >> $GITHUB_OUTPUT
-          echo "delete_count=${DELETE_COUNT}" >> $GITHUB_OUTPUT
-          echo "replace_count=${REPLACE_COUNT}" >> $GITHUB_OUTPUT
+          total_count=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
           
-          TOTAL_COUNT=$((CREATE_COUNT + UPDATE_COUNT + DELETE_COUNT + REPLACE_COUNT))
-          echo "total_count=${TOTAL_COUNT}" >> $GITHUB_OUTPUT
+          echo "create_count=$create_count" >> $GITHUB_OUTPUT
+          echo "update_count=$update_count" >> $GITHUB_OUTPUT
+          echo "delete_count=$delete_count" >> $GITHUB_OUTPUT
+          echo "replace_count=$replace_count" >> $GITHUB_OUTPUT
+          echo "total_count=$total_count" >> $GITHUB_OUTPUT
           
-          echo "📊 Drift summary: ${CREATE_COUNT} creates, ${UPDATE_COUNT} updates, ${DELETE_COUNT} deletes, ${REPLACE_COUNT} replaces"
+          echo "Plan Summary: $create_count creates, $update_count updates, $delete_count deletes, $replace_count replacements."
 
-      - name: Query CloudTrail for attribution
+      - name: Query CloudTrail for Attribution
         id: cloudtrail
-        if: steps.plan.outputs.drift_detected == 'true'
+        if: steps.plan.outputs.exit_code == '2'
         run: |
-          if [ -f scripts/drift-detection/query-cloudtrail.sh ]; then
-            chmod +x scripts/drift-detection/query-cloudtrail.sh
-            scripts/drift-detection/query-cloudtrail.sh || true
-          else
-            echo "CloudTrail query script not found, skipping attribution"
-          fi
+          # Query CloudTrail to get actor attribution for each resource change
+          bash scripts/drift-detection/query-cloudtrail.sh \
+            /tmp/drift_resources.txt \
+            /tmp/drift_resources_attributed.txt
+          
+          # Generate attribution table in Markdown format for GitHub Issue
+          echo "### Drift Attribution Analysis" > /tmp/attribution_table.md
+          echo "" >> /tmp/attribution_table.md
+          echo "| Resource | Action | Actor Name | Actor ARN | Event Time |" >> /tmp/attribution_table.md
+          echo "|---|---|---|---|---|" >> /tmp/attribution_table.md
+          
+          # Parse attributed file and create table rows
+          while IFS='|' read -r address action resource_type identifier actor_name actor_arn event_time; do
+            [ -z "$address" ] && continue
+            
+            # Format actor info for display
+            if [ "$actor_name" = "*(unavailable)*" ] || [ -z "$actor_name" ] || [ "$actor_name" = "-" ]; then
+              actor_display="*(No CloudTrail event found)*"
+              arn_display="-"
+              time_display="-"
+            else
+              actor_display="**${actor_name}**"
+              arn_display="\`${actor_arn}\`"
+              time_display="$event_time"
+            fi
+            
+            echo "| \`$address\` | $action | $actor_display | $arn_display | $time_display |" >> /tmp/attribution_table.md
+          done < /tmp/drift_resources_attributed.txt
+          
+          echo "" >> /tmp/attribution_table.md
+          echo "> ℹ️ CloudTrail lookup performed. Events older than 7 days cannot be queried." >> /tmp/attribution_table.md
+          
+          echo "Attribution table generated"
+          cat /tmp/attribution_table.md
 
       - name: Generate issue body
         id: issue_body
@@ -178,6 +230,13 @@ jobs:
           
           # Get plan text output (truncated)
           PLAN_OUTPUT=$(head -200 ${{ github.workspace }}/plan_output.txt)
+          
+          # Read attribution table
+          if [ -f /tmp/attribution_table.md ]; then
+            ATTRIBUTION_SECTION=$(cat /tmp/attribution_table.md)
+          else
+            ATTRIBUTION_SECTION="No attribution data available."
+          fi
           
           # Create issue body
           cat > /tmp/issue_body.md << EOF
@@ -200,6 +259,10 @@ jobs:
           | 🗑️ Deletes | ${DELETE_COUNT} |
           | 🔄 Replaces | ${REPLACE_COUNT} |
           | **Total** | **${TOTAL_COUNT}** |
+
+          ---
+
+          ${ATTRIBUTION_SECTION}
 
           ---
 
@@ -253,31 +316,40 @@ jobs:
           echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
           echo "✅ Created issue: $ISSUE_URL"
 
-      - name: Send Teams notification
-        if: steps.plan.outputs.drift_detected == 'true' && steps.create_issue.outputs.issue_url != ''
+      - name: Generate Drift Report JSON
+        id: drift_report
+        if: steps.plan.outputs.drift_detected == 'true'
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          ISSUE_URL: ${{ steps.create_issue.outputs.issue_url }}
           ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
-          chmod +x scripts/drift-detection/format-teams-card.sh
+          # Generate drift report JSON with actor attribution
+          bash scripts/drift-detection/generate-drift-report.sh \
+            /tmp/drift_resources_attributed.txt \
+            /tmp/drift_report.json
           
-          # Generate Teams card JSON
-          TEAMS_PAYLOAD=$(scripts/drift-detection/format-teams-card.sh)
-          
-          # Send to Teams
-          RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/teams_response.txt \
-            -H "Content-Type: application/json" \
-            -d "$TEAMS_PAYLOAD" \
-            "$TEAMS_WEBHOOK_URL")
-          
-          if [ "$RESPONSE" = "200" ] || [ "$RESPONSE" = "202" ]; then
-            echo "✅ Teams notification sent successfully"
+          echo "✅ Drift report JSON generated at /tmp/drift_report.json"
+
+      - name: Send Telegram Notification
+        if: steps.plan.outputs.drift_detected == 'true'
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+        run: |
+          cd scripts/drift-detection
+          # Check if the script exists
+          if [ -f notify_telegram.py ]; then
+            python notify_telegram.py \
+              --report /tmp/drift_report.json \
+              --environment ${{ github.event.inputs.environment || 'dev' }} \
+              --run-id ${{ github.run_id }}
           else
-            echo "⚠️ Teams notification failed with status $RESPONSE"
-            cat /tmp/teams_response.txt
-            # Don't fail the workflow for notification failures
+             echo "notify_telegram.py not found, skipping notification"
           fi
 
       - name: Workflow Summary
