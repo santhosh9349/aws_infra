@@ -334,6 +334,39 @@ jobs:
           
           echo "✅ Drift report JSON generated at /tmp/drift_report.json"
 
+      - name: Upload Drift Artifacts
+        id: upload_artifacts
+        if: steps.plan.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-data
+          path: |
+            /tmp/drift_resources.txt
+            /tmp/drift_resources_attributed.txt
+            /tmp/attribution_table.md
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload Drift Report
+        if: steps.plan.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-report
+          path: /tmp/drift_report.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload Terraform Plan
+        if: steps.plan.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            ${{ github.workspace }}/plan_output.txt
+            ${{ github.workspace }}/plan_stream.jsonl
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Send Telegram Notification
         if: steps.plan.outputs.drift_detected == 'true'
         continue-on-error: true
@@ -352,6 +385,19 @@ jobs:
           else
              echo "notify_telegram.py not found, skipping notification"
           fi
+
+      - name: Trigger AI Analysis Workflow (Optional)
+        # Set repository variable ENABLE_AI_DRIFT_ANALYSIS to 'true' to enable
+        # This is opt-in: if the variable is not set, AI analysis will not run
+        if: steps.plan.outputs.drift_detected == 'true' && vars.ENABLE_AI_DRIFT_ANALYSIS == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🤖 Triggering AI-powered drift analysis workflow..."
+          gh workflow run drift-analysis.lock.yml \
+            -f environment="${{ github.event.inputs.environment || 'dev' }}" \
+            || echo "⚠️ AI analysis workflow not available or failed to trigger"
 
       - name: Workflow Summary
         run: |
