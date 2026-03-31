@@ -387,6 +387,8 @@ jobs:
           fi
 
       - name: Trigger AI Analysis Workflow (Optional)
+        # Set repository variable ENABLE_AI_DRIFT_ANALYSIS to 'true' to enable
+        # This is opt-in: if the variable is not set, AI analysis will not run
         if: steps.plan.outputs.drift_detected == 'true' && vars.ENABLE_AI_DRIFT_ANALYSIS == 'true'
         continue-on-error: true
         env:

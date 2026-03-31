@@ -143,13 +143,18 @@ You are an expert DevOps and Infrastructure engineer specializing in AWS and Ter
 
 ### Step 1: Gather Information
 
-First, check for drift context that was prepared in the setup steps:
-- Read `/tmp/drift-context.md` if it exists
-- Check for any drift artifacts in `/tmp/drift-artifacts/`
-- Use the GitHub MCP tools to search for recent drift-related issues
+First, check for drift context that was prepared in the setup steps.
 
-If no drift artifacts are available, search for:
-- Recent workflow runs of the `drift-detection.yml` workflow
+**Important**: The workflow setup steps download artifacts and prepare context files. Check these locations:
+- `/tmp/drift-context.md` - Summary of drift data prepared by the workflow
+- `/tmp/drift-artifacts/` - Directory containing downloaded artifacts:
+  - `drift-report/drift_report.json` - Structured drift report
+  - `drift-data/drift_resources_attributed.txt` - Attribution data
+  - `terraform-plan/plan_output.txt` - Raw Terraform plan
+
+**If files don't exist**: This is normal if no recent drift was detected or artifacts expired.
+In this case, use the GitHub MCP tools to search for:
+- Recent workflow runs of the `drift-detection.yml` workflow using the actions toolset
 - Recent issues with the `drift` label
 - The Terraform configuration in `terraform/dev/` or `terraform/prod/`
 
