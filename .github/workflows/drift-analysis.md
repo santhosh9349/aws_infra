@@ -46,8 +46,8 @@ safe-outputs:
     close-older-issues: true
 
 engine:
-  id: copilot
-  model: gpt-4.1
+  id: claude
+  model: claude-sonnet-4.6
 
 timeout-minutes: 15
 
