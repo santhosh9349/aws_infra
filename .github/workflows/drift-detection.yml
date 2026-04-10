@@ -135,28 +135,34 @@ jobs:
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          bash ${{ github.workspace }}/scripts/drift-detection/generate-plan-json.sh \
-            ${{ github.workspace }}/plan_stream.jsonl \
-            /tmp/plan.json
-
-      - name: Parse Terraform Plan
-        id: parse
-        if: steps.plan.outputs.exit_code == '2'
-        run: |
-          bash scripts/drift-detection/parse-terraform-plan.sh \
-            /tmp/plan.json \
-            /tmp/drift_resources.txt
-
-          create_count=$(grep -c '|create|' /tmp/drift_resources.txt 2>/dev/null || true)
-          update_count=$(grep -c '|update|' /tmp/drift_resources.txt 2>/dev/null || true)
-          delete_count=$(grep -c '|delete|' /tmp/drift_resources.txt 2>/dev/null || true)
-          replace_count=$(grep -c '|replace|' /tmp/drift_resources.txt 2>/dev/null || true)
-
-          create_count=${create_count:-0}
-          update_count=${update_count:-0}
-          delete_count=${delete_count:-0}
-          replace_count=${replace_count:-0}
-
+          # Parse the plan text output to identify changed resources
+          echo "Parsing drift from plan output..."
+          
+          # Extract resource changes from plan output
+          grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt 2>/dev/null || true
+          
+          # Count changes safely using a function
+          count_matches() {
+            local pattern="$1"
+            local file="$2"
+            if [ -f "$file" ]; then
+              grep -c "$pattern" "$file" 2>/dev/null || echo 0
+            else
+              echo 0
+            fi
+          }
+          
+          CREATE_COUNT=$(count_matches "will be created" /tmp/drift_resources.txt)
+          UPDATE_COUNT=$(count_matches "will be updated" /tmp/drift_resources.txt)
+          DELETE_COUNT=$(count_matches "will be destroyed" /tmp/drift_resources.txt)
+          REPLACE_COUNT=$(count_matches "must be replaced" /tmp/drift_resources.txt)
+          
+          # Ensure values are valid integers (default to 0)
+          CREATE_COUNT=$((CREATE_COUNT + 0))
+          UPDATE_COUNT=$((UPDATE_COUNT + 0))
+          DELETE_COUNT=$((DELETE_COUNT + 0))
+          REPLACE_COUNT=$((REPLACE_COUNT + 0))
+          
           total_count=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
 
           echo "create_count=$create_count" >> $GITHUB_OUTPUT
