@@ -122,18 +122,16 @@ jobs:
         run: |
           echo "::error::Terraform plan failed. Check the logs above for details."
           exit 1
-
       - name: Parse Plan JSON Stream
-        id: parse
         if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
           # Parse the plan text output to identify changed resources
           echo "Parsing drift from plan output..."
-
+          
           # Extract resource changes from plan output
           grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt 2>/dev/null || true
-
+          
           # Count changes safely using a function
           count_matches() {
             local pattern="$1"
@@ -144,28 +142,27 @@ jobs:
               echo 0
             fi
           }
-
+          
           CREATE_COUNT=$(count_matches "will be created" /tmp/drift_resources.txt)
           UPDATE_COUNT=$(count_matches "will be updated" /tmp/drift_resources.txt)
           DELETE_COUNT=$(count_matches "will be destroyed" /tmp/drift_resources.txt)
           REPLACE_COUNT=$(count_matches "must be replaced" /tmp/drift_resources.txt)
-
+          
           # Ensure values are valid integers (default to 0)
           CREATE_COUNT=$((CREATE_COUNT + 0))
           UPDATE_COUNT=$((UPDATE_COUNT + 0))
           DELETE_COUNT=$((DELETE_COUNT + 0))
           REPLACE_COUNT=$((REPLACE_COUNT + 0))
-
-          TOTAL_COUNT=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
-          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
-          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
-          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
-          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
-          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
-          echo "Plan Summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replacements."
+          
+          total_count=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
+          echo "create_count=$create_count" >> $GITHUB_OUTPUT
+          echo "update_count=$update_count" >> $GITHUB_OUTPUT
+          echo "delete_count=$delete_count" >> $GITHUB_OUTPUT
+          echo "replace_count=$replace_count" >> $GITHUB_OUTPUT
+          echo "total_count=$total_count" >> $GITHUB_OUTPUT
+          echo "Plan Summary: $create_count creates, $update_count updates, $delete_count deletes, $replace_count replacements."
           # Stage for artifact upload
           cp /tmp/drift_resources.txt ${{ github.workspace }}/drift_resources.txt
-
       - name: Upload Drift Scan Artifacts
         if: steps.plan.outputs.drift_detected == 'true'
         uses: actions/upload-artifact@v4
@@ -184,7 +181,6 @@ jobs:
           echo "## ✅ No Drift Detected" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Infrastructure in **${{ github.event.inputs.environment || 'dev' }}** matches the Terraform state." >> $GITHUB_STEP_SUMMARY
-
   # ═══════════════════════════════════════════════════════════════
   # JOB 2: CloudTrail Lookup
   # - Download drift scan artifacts (resource IDs/ARNs)
@@ -226,16 +222,13 @@ jobs:
           bash scripts/drift-detection/query-cloudtrail.sh \
             /tmp/drift-scan/drift_resources.txt \
             /tmp/drift_resources_attributed.txt
-
           # Generate attribution table in Markdown format for GitHub Issue
           echo "### Drift Attribution Analysis" > /tmp/attribution_table.md
           echo "" >> /tmp/attribution_table.md
           echo "| Resource | Action | Actor Name | Actor ARN | Event Time |" >> /tmp/attribution_table.md
           echo "|---|---|---|---|---|" >> /tmp/attribution_table.md
-
           while IFS='|' read -r address action resource_type identifier actor_name actor_arn event_time; do
             [ -z "$address" ] && continue
-
             if [ "$actor_name" = "*(unavailable)*" ] || [ -z "$actor_name" ] || [ "$actor_name" = "-" ]; then
               actor_display="*(No CloudTrail event found)*"
               arn_display="-"
@@ -245,16 +238,12 @@ jobs:
               arn_display="\`${actor_arn}\`"
               time_display="$event_time"
             fi
-
             echo "| \`$address\` | $action | $actor_display | $arn_display | $time_display |" >> /tmp/attribution_table.md
           done < /tmp/drift_resources_attributed.txt
-
           echo "" >> /tmp/attribution_table.md
           echo "> ℹ️ CloudTrail lookup performed. Events older than 7 days cannot be queried." >> /tmp/attribution_table.md
-
           echo "Attribution table generated"
           cat /tmp/attribution_table.md
-
       - name: Upload CloudTrail Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -300,7 +289,6 @@ jobs:
           else
             echo "requirements.txt not found, skipping"
           fi
-
       - name: Download Drift Scan Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -331,20 +319,15 @@ jobs:
           else
             ATTRIBUTION_SECTION="No attribution data available."
           fi
-
           cat > /tmp/issue_body.md << EOF
           ## Drift Detection Report
-
           | Field | Value |
           |-------|-------|
           | **Environment** | ${ENVIRONMENT} |
           | **Detected At** | ${TIMESTAMP} |
           | **Workflow Run** | [${RUN_ID}](${RUN_URL}) |
-
           ---
-
           ### Summary
-
           | Metric | Count |
           |--------|-------|
           | 🆕 Creates | ${CREATE_COUNT} |
@@ -352,47 +335,32 @@ jobs:
           | 🗑️ Deletes | ${DELETE_COUNT} |
           | 🔄 Replaces | ${REPLACE_COUNT} |
           | **Total** | **${TOTAL_COUNT}** |
-
           ---
-
           ${ATTRIBUTION_SECTION}
-
           ---
-
           ### Terraform Plan Output
-
           <details>
           <summary>Click to expand full plan output</summary>
-
           \`\`\`hcl
           ${PLAN_OUTPUT}
           \`\`\`
-
           </details>
-
           ---
-
           ### Remediation Options
-
           #### Option 1: Accept Drift (Update Terraform)
           \`\`\`bash
           cd terraform/${ENVIRONMENT}
           terraform plan
           \`\`\`
-
           #### Option 2: Revert Drift (Apply Terraform)
           \`\`\`bash
           cd terraform/${ENVIRONMENT}
           terraform apply
           \`\`\`
-
           ---
-
           *This issue was automatically created by the [drift detection workflow](${RUN_URL}).*
           EOF
-
           echo "Issue body generated"
-
       - name: Create GitHub Issue
         id: create_issue
         env:
@@ -404,10 +372,8 @@ jobs:
             --title "🔴 Terraform Drift Detected - ${ENVIRONMENT} - ${DATE}" \
             --body-file /tmp/issue_body.md \
             --label "drift,infrastructure,automated,${ENVIRONMENT}")
-
           echo "issue_url=$ISSUE_URL" >> $GITHUB_OUTPUT
           echo "✅ Created issue: $ISSUE_URL"
-
       - name: Generate Drift Report JSON
         env:
           ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
@@ -419,9 +385,7 @@ jobs:
           bash scripts/drift-detection/generate-drift-report.sh \
             /tmp/cloudtrail/drift_resources_attributed.txt \
             /tmp/drift_report.json
-
           echo "✅ Drift report JSON generated"
-
       - name: Send Telegram Notification
         continue-on-error: true
         env:
@@ -438,7 +402,6 @@ jobs:
           else
             echo "notify_telegram.py not found, skipping notification"
           fi
-
       - name: Upload Drift Report
         uses: actions/upload-artifact@v4
         with:
@@ -457,7 +420,6 @@ jobs:
           gh workflow run drift-analysis.lock.yml \
             -f environment="${{ github.event.inputs.environment || 'dev' }}" \
             || echo "⚠️ AI analysis workflow not available or failed to trigger"
-
       - name: Drift Summary
         run: |
           echo "## ⚠️ Drift Detected" >> $GITHUB_STEP_SUMMARY
