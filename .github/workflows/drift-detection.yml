@@ -21,16 +21,13 @@ on:
 env:
   TF_VERSION: '1.5.7'
   AWS_REGION: 'eu-west-2'
-  TF_CLOUD_ORGANIZATION: 'santhosh9349'
-  TF_API_TOKEN: ${{ secrets.TF_API_TOKEN }}
 
 jobs:
   # ═══════════════════════════════════════════════════════════════
   # JOB 1: Terraform Drift Scan
-  # - Upload config to Terraform Cloud via API
-  # - Run speculative plan via TFC API (handles state lock, retries)
-  # - Get structured plan output (add/change/destroy counts)
-  # - Parse JSON stream for resource IDs/ARNs
+  # - Checkout repo & connect Terraform Cloud API
+  # - Run terraform plan to detect drift
+  # - Parse plan output and extract resource IDs/ARNs
   # - Upload scan artifacts for downstream jobs
   # ═══════════════════════════════════════════════════════════════
   terraform-drift-scan:
@@ -43,12 +40,13 @@ jobs:
       contents: read
 
     outputs:
-      drift_detected: ${{ steps.drift-check.outputs.drift_detected }}
-      create_count: ${{ steps.plan-output.outputs.add }}
-      update_count: ${{ steps.plan-output.outputs.change }}
-      delete_count: ${{ steps.plan-output.outputs.destroy }}
-      total_count: ${{ steps.totals.outputs.total_count }}
-      plan_status: ${{ steps.plan-output.outputs.plan_status }}
+      drift_detected: ${{ steps.plan.outputs.drift_detected }}
+      exit_code: ${{ steps.plan.outputs.exit_code }}
+      create_count: ${{ steps.parse.outputs.create_count }}
+      update_count: ${{ steps.parse.outputs.update_count }}
+      delete_count: ${{ steps.parse.outputs.delete_count }}
+      replace_count: ${{ steps.parse.outputs.replace_count }}
+      total_count: ${{ steps.parse.outputs.total_count }}
 
     steps:
       - name: Checkout repository
@@ -61,110 +59,131 @@ jobs:
           role-session-name: DriftDetectionSession
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Upload Configuration to TFC
-        uses: hashicorp/tfc-workflows-github/actions/upload-configuration@v1.3.2
-        id: upload
-        with:
-          workspace: tf_${{ github.event.inputs.environment || 'dev' }}
-          directory: terraform/${{ github.event.inputs.environment || 'dev' }}
-          speculative: true
-
-      - name: Create Plan Run in TFC
-        uses: hashicorp/tfc-workflows-github/actions/create-run@v1.3.2
-        id: run
-        with:
-          workspace: tf_${{ github.event.inputs.environment || 'dev' }}
-          configuration_version: ${{ steps.upload.outputs.configuration_version_id }}
-          plan_only: true
-          message: "Drift Detection - ${{ github.event.inputs.environment || 'dev' }} - Run ${{ github.run_id }}"
-
-      - name: Get Plan Output from TFC
-        uses: hashicorp/tfc-workflows-github/actions/plan-output@v1.3.2
-        id: plan-output
-        with:
-          plan: ${{ steps.run.outputs.plan_id }}
-
-      - name: Determine Drift Status
-        id: drift-check
-        run: |
-          ADD="${{ steps.plan-output.outputs.add }}"
-          CHANGE="${{ steps.plan-output.outputs.change }}"
-          DESTROY="${{ steps.plan-output.outputs.destroy }}"
-          PLAN_STATUS="${{ steps.plan-output.outputs.plan_status }}"
-
-          echo "Plan status: $PLAN_STATUS"
-          echo "Resources: +$ADD ~$CHANGE -$DESTROY"
-
-          if [ "$ADD" = "0" ] && [ "$CHANGE" = "0" ] && [ "$DESTROY" = "0" ]; then
-            echo "✅ No drift detected"
-            echo "drift_detected=false" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Drift detected"
-            echo "drift_detected=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Calculate Totals
-        id: totals
-        run: |
-          ADD="${{ steps.plan-output.outputs.add }}"
-          CHANGE="${{ steps.plan-output.outputs.change }}"
-          DESTROY="${{ steps.plan-output.outputs.destroy }}"
-          TOTAL=$((ADD + CHANGE + DESTROY))
-          echo "total_count=$TOTAL" >> $GITHUB_OUTPUT
-
-      - name: Setup Terraform (for JSON plan)
-        if: steps.drift-check.outputs.drift_detected == 'true'
+      - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
           terraform_wrapper: false
 
-      - name: Generate JSON Plan for Resource Parsing
-        if: steps.drift-check.outputs.drift_detected == 'true'
+      - name: Terraform Init
+        working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
+        run: terraform init -input=false
+
+      - name: Terraform Plan (Drift Detection)
+        id: plan
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          terraform init -input=false
-          terraform plan -json -input=false 2>&1 > /tmp/plan_stream.jsonl || true
-          cp /tmp/plan_stream.jsonl ${{ github.workspace }}/plan_stream.jsonl
+          set +e
+          MAX_RETRIES=2
+          RETRY_DELAY=300  # 5 minutes
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "🔄 Terraform plan attempt $attempt of $MAX_RETRIES"
+            terraform plan -detailed-exitcode -input=false -no-color 2>&1 | tee /tmp/plan_output.txt
+            EXIT_CODE=${PIPESTATUS[0]}
+            # Check for state lock error
+            if grep -q "Error acquiring the state lock\|Error locking state\|Lock Info:" /tmp/plan_output.txt; then
+              if [ $attempt -lt $MAX_RETRIES ]; then
+                echo "⏳ State lock detected, waiting ${RETRY_DELAY}s before retry..."
+                sleep $RETRY_DELAY
+                continue
+              else
+                echo "❌ State lock persisted after $MAX_RETRIES attempts"
+                exit 1
+              fi
+            fi
+            # If plan succeeded or found drift, also generate JSON output
+            if [ $EXIT_CODE -eq 0 ] || [ $EXIT_CODE -eq 2 ]; then
+              echo "Generating JSON plan output..."
+              terraform plan -json -detailed-exitcode -input=false 2>&1 > /tmp/plan_stream.jsonl || true
+            fi
+            break
+          done
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_OUTPUT
+          # Stage plan outputs for artifact upload
+          cp /tmp/plan_output.txt ${{ github.workspace }}/plan_output.txt
+          if [ -f /tmp/plan_stream.jsonl ]; then
+            cp /tmp/plan_stream.jsonl ${{ github.workspace }}/plan_stream.jsonl
+          fi
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✅ No drift detected - infrastructure matches Terraform state"
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+          elif [ $EXIT_CODE -eq 1 ]; then
+            echo "❌ Terraform plan failed with an error"
+            exit 1
+          elif [ $EXIT_CODE -eq 2 ]; then
+            echo "⚠️ Drift detected - infrastructure differs from Terraform state"
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: true
+
+      - name: Check for plan errors
+        if: steps.plan.outputs.exit_code == '1'
+        run: |
+          echo "::error::Terraform plan failed. Check the logs above for details."
+          exit 1
 
       - name: Parse Plan JSON Stream
-        if: steps.drift-check.outputs.drift_detected == 'true'
+        id: parse
+        if: steps.plan.outputs.exit_code == '2'
         working-directory: terraform/${{ github.event.inputs.environment || 'dev' }}
         run: |
-          bash ${{ github.workspace }}/scripts/drift-detection/generate-plan-json.sh \
-            ${{ github.workspace }}/plan_stream.jsonl \
-            /tmp/plan.json
+          # Parse the plan text output to identify changed resources
+          echo "Parsing drift from plan output..."
 
-      - name: Parse Terraform Plan for Resource IDs
-        id: parse
-        if: steps.drift-check.outputs.drift_detected == 'true'
-        run: |
-          bash scripts/drift-detection/parse-terraform-plan.sh \
-            /tmp/plan.json \
-            /tmp/drift_resources.txt
+          # Extract resource changes from plan output
+          grep -E "^  # .* (will be|must be)" ${{ github.workspace }}/plan_output.txt > /tmp/drift_resources.txt 2>/dev/null || true
 
+          # Count changes safely using a function
+          count_matches() {
+            local pattern="$1"
+            local file="$2"
+            if [ -f "$file" ]; then
+              grep -c "$pattern" "$file" 2>/dev/null || echo 0
+            else
+              echo 0
+            fi
+          }
+
+          CREATE_COUNT=$(count_matches "will be created" /tmp/drift_resources.txt)
+          UPDATE_COUNT=$(count_matches "will be updated" /tmp/drift_resources.txt)
+          DELETE_COUNT=$(count_matches "will be destroyed" /tmp/drift_resources.txt)
+          REPLACE_COUNT=$(count_matches "must be replaced" /tmp/drift_resources.txt)
+
+          # Ensure values are valid integers (default to 0)
+          CREATE_COUNT=$((CREATE_COUNT + 0))
+          UPDATE_COUNT=$((UPDATE_COUNT + 0))
+          DELETE_COUNT=$((DELETE_COUNT + 0))
+          REPLACE_COUNT=$((REPLACE_COUNT + 0))
+
+          TOTAL_COUNT=$(wc -l < /tmp/drift_resources.txt | tr -d ' ')
+          echo "create_count=$CREATE_COUNT" >> $GITHUB_OUTPUT
+          echo "update_count=$UPDATE_COUNT" >> $GITHUB_OUTPUT
+          echo "delete_count=$DELETE_COUNT" >> $GITHUB_OUTPUT
+          echo "replace_count=$REPLACE_COUNT" >> $GITHUB_OUTPUT
+          echo "total_count=$TOTAL_COUNT" >> $GITHUB_OUTPUT
+          echo "Plan Summary: $CREATE_COUNT creates, $UPDATE_COUNT updates, $DELETE_COUNT deletes, $REPLACE_COUNT replacements."
+          # Stage for artifact upload
           cp /tmp/drift_resources.txt ${{ github.workspace }}/drift_resources.txt
 
       - name: Upload Drift Scan Artifacts
-        if: steps.drift-check.outputs.drift_detected == 'true'
+        if: steps.plan.outputs.drift_detected == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: drift-scan-data
           path: |
+            ${{ github.workspace }}/plan_output.txt
             ${{ github.workspace }}/plan_stream.jsonl
             ${{ github.workspace }}/drift_resources.txt
           retention-days: 7
           if-no-files-found: warn
 
       - name: No Drift Summary
-        if: steps.drift-check.outputs.drift_detected == 'false'
+        if: steps.plan.outputs.drift_detected == 'false'
         run: |
           echo "## ✅ No Drift Detected" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Infrastructure in **${{ github.event.inputs.environment || 'dev' }}** matches the Terraform state." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 **TFC Run**: ${{ steps.run.outputs.run_link }}" >> $GITHUB_STEP_SUMMARY
 
   # ═══════════════════════════════════════════════════════════════
   # JOB 2: CloudTrail Lookup
@@ -299,14 +318,14 @@ jobs:
           ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          ADD_COUNT: ${{ needs.terraform-drift-scan.outputs.create_count }}
-          CHANGE_COUNT: ${{ needs.terraform-drift-scan.outputs.update_count }}
-          DESTROY_COUNT: ${{ needs.terraform-drift-scan.outputs.delete_count }}
+          CREATE_COUNT: ${{ needs.terraform-drift-scan.outputs.create_count }}
+          UPDATE_COUNT: ${{ needs.terraform-drift-scan.outputs.update_count }}
+          DELETE_COUNT: ${{ needs.terraform-drift-scan.outputs.delete_count }}
+          REPLACE_COUNT: ${{ needs.terraform-drift-scan.outputs.replace_count }}
           TOTAL_COUNT: ${{ needs.terraform-drift-scan.outputs.total_count }}
-          PLAN_STATUS: ${{ needs.terraform-drift-scan.outputs.plan_status }}
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
+          PLAN_OUTPUT=$(head -200 /tmp/drift-scan/plan_output.txt)
           if [ -f /tmp/cloudtrail/attribution_table.md ]; then
             ATTRIBUTION_SECTION=$(cat /tmp/cloudtrail/attribution_table.md)
           else
@@ -320,7 +339,6 @@ jobs:
           |-------|-------|
           | **Environment** | ${ENVIRONMENT} |
           | **Detected At** | ${TIMESTAMP} |
-          | **Plan Status** | ${PLAN_STATUS} |
           | **Workflow Run** | [${RUN_ID}](${RUN_URL}) |
 
           ---
@@ -329,14 +347,28 @@ jobs:
 
           | Metric | Count |
           |--------|-------|
-          | 🆕 Add | ${ADD_COUNT} |
-          | 📝 Change | ${CHANGE_COUNT} |
-          | 🗑️ Destroy | ${DESTROY_COUNT} |
+          | 🆕 Creates | ${CREATE_COUNT} |
+          | 📝 Updates | ${UPDATE_COUNT} |
+          | 🗑️ Deletes | ${DELETE_COUNT} |
+          | 🔄 Replaces | ${REPLACE_COUNT} |
           | **Total** | **${TOTAL_COUNT}** |
 
           ---
 
           ${ATTRIBUTION_SECTION}
+
+          ---
+
+          ### Terraform Plan Output
+
+          <details>
+          <summary>Click to expand full plan output</summary>
+
+          \`\`\`hcl
+          ${PLAN_OUTPUT}
+          \`\`\`
+
+          </details>
 
           ---
 
